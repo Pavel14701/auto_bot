@@ -26,6 +26,7 @@ from app.application.catalog.dto import (
     PricePoint,
 )
 from app.application.market.dto import LISTING_STATUS_ACCEPTED
+from app.domain.pricing.rates import MULTIPLY_TO_USD, UNITS_PER_USD
 from app.infrastructure.db.models import (
     InspectionReport,
     Listing,
@@ -42,19 +43,33 @@ from app.infrastructure.sources.common.normalize import (
     normalize_transmission,
 )
 
-# Курс для нормализации сортировки/фильтра в USD. TODO: вынести в Settings.usd_krw.
-_USD_KRW_FALLBACK = 1350.0
+# Курс для нормализации сортировки/фильтра в USD живёт в
+# `app.domain.pricing.rates` (единая таблица, синхронизирована с frontend).
 _FACETS_LIMIT = 500
 # Окно цены для «похожих» машин: ±35% от цены исходного объявления.
 _SIMILAR_PRICE_TOLERANCE = Decimal("0.35")
 
 
 def _usd_price_expr():
-    """SQL-выражение `price` в USD (KRW нормализуется по курсу)."""
-    return case(
-        (func.upper(Listing.currency) == "KRW", Listing.price / _USD_KRW_FALLBACK),
-        else_=Listing.price,
+    """SQL-выражение `price` в USD (фикс-курсы MVP, `app.domain.pricing.rates`).
+
+    KRW/KZT/CNY/AED/RUB/BYN — «N единиц за доллар» (`price / rate`),
+    EUR — цена × 1.08 (котируется «долларов за евро», как на фронте),
+    USD — как есть. Неизвестная/NULL-валюта → NULL: такое объявление
+    выпадает из ценовых фильтров и уходит в конец сортировки
+    (`nulls_last`), но остаётся в выдаче без ценовых условий.
+    """
+    branches = [
+        (func.upper(Listing.currency) == code, Listing.price / rate)
+        for code, rate in UNITS_PER_USD.items()
+    ]
+    branches.extend(
+        (func.upper(Listing.currency) == code, Listing.price * rate)
+        for code, rate in MULTIPLY_TO_USD.items()
     )
+    branches.append((func.upper(Listing.currency) == "USD", Listing.price))
+    # else → NULL: невалюта не участвует в ценовых сравнениях.
+    return case(*branches)
 
 
 def _escape_like(value: str) -> str:

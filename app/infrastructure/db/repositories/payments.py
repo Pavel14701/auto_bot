@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.billing.dto import (
@@ -23,7 +23,7 @@ from app.application.billing.dto import (
     PaymentRecord,
     SubscriptionState,
 )
-from app.application.market.dto import LISTING_STATUS_ACCEPTED
+from app.application.market.dto import LISTING_STATUS_ACCEPTED, LISTING_STATUS_ARCHIVED
 from app.infrastructure.db.models import Listing, Payment, User
 
 
@@ -125,6 +125,11 @@ class SqlAlchemyPaymentRepository:
         Статус — 'accepted' (10 §1): продление истёкшего (expired) лота
         возвращает его в ленту; черновики и очередь модерации до
         оплаты не доходят (ExtendLot отсекает их 409).
+
+        B-07/B-08 (аудит 2026-10-29): дедлайн — GREATEST(текущего, нового):
+        параллельные вебхуки двух инвойсов не должны затирать друг друга
+        (раньше меньший until перезаписывал больший — потеря оплаченной
+        недели). Archived-лот оплатой старого инвойса не оживляем.
         """
         result = await self._session.execute(
             update(Listing)
@@ -132,9 +137,12 @@ class SqlAlchemyPaymentRepository:
                 Listing.id == listing_id,
                 Listing.owner_type == "user",
                 Listing.owner_user_id == user_id,
+                Listing.status != LISTING_STATUS_ARCHIVED,
             )
             .values(
-                placement_paid_until=until,
+                placement_paid_until=func.greatest(
+                    func.coalesce(Listing.placement_paid_until, until), until
+                ),
                 is_active=True,
                 status=LISTING_STATUS_ACCEPTED,
             )
@@ -202,3 +210,13 @@ class SqlAlchemyPaymentRepository:
     async def commit(self) -> None:
         """Зафиксировать платёж и подписку одной транзакцией."""
         await self._session.commit()
+
+    async def rollback(self) -> None:
+        """Откатить текущую транзакцию (B-02: гонка двойного вебхука).
+
+        `mark_paid` вернул `False` — платёж уже оплатил параллельный вебхук;
+        открытый этой веткой no-op UPDATE (rowcount=0) транзакцию не грязнит,
+        но и оставлять её висеть нельзя: отбрасываем и возвращаем
+        подтверждение без повторного эффекта.
+        """
+        await self._session.rollback()

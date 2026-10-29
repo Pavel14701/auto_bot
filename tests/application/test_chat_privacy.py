@@ -127,3 +127,31 @@ def test_masked_body_then_validation_order():
     assert _masked_phone("Обычное сообщение без контактов") == (
         "Обычное сообщение без контактов"
     )
+
+
+# ---------- PRIV-01 (аудит 2026-10-29): голые номера и email ----------
+
+
+def test_bare_phone_without_plus_masked():
+    """Телефон без +/8 (>=10 цифр) маскируется — обход «без плюса» закрыт."""
+    assert mask_contacts("звони 9991234567 сейчас", "bot") == (
+        "звони " + PHONE_MASK + " сейчас"
+    )
+    # с разделителями внутри
+    assert "скрыт" in mask_contacts("9 999 123 45 67", "bot")
+
+
+def test_email_masked():
+    """Email маскируется (обмен почтой — только через сделку)."""
+    assert mask_contacts("пиши ivan.ivanov@gmail.com", "bot").endswith(PHONE_MASK)
+
+
+def test_vin_and_codes_not_masked():
+    """VIN/модели/годы не задеваются новым BARE_PHONE_RE."""
+    for keep in ("VIN WVWZZZ1KZAW123456", "модель 520i, 2022", "объём 2.5 л"):
+        assert mask_contacts(keep, "bot") == keep
+
+
+def test_wa_me_with_phone_single_mask():
+    """wa.me/<номер> — одна маска мессенджера, телефон не дублируется."""
+    assert mask_contacts("wa.me/79161234567", "bot") == MESSENGER_MASK

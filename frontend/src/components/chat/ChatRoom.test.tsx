@@ -207,7 +207,8 @@ describe("ChatRoom: лента сообщений", () => {
       .mockRejectedValueOnce(new Error("network down"))
       .mockResolvedValue({ items: [msg(10, "user", "привет")], has_more: false });
     renderRoom();
-    expect(await screen.findByText("network down")).toBeTruthy();
+    // сырой текст наружу не показываем (UX-005): маппинг 03 §3.2
+    expect(await screen.findByText(/Что-то пошло не так/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
     await waitFor(() => expect(mocks.fetchMessages).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByText("привет")).toBeTruthy());

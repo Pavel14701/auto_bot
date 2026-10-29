@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from redis.asyncio import Redis
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.listings.ingest import IngestListings
@@ -45,14 +46,42 @@ logger = logging.getLogger(__name__)
 
 
 class _RedisDuplicates:
-    """Порт `DuplicateGuard` поверх Redis-ключей дедупа (TTL 48 ч)."""
+    """Порт `DuplicateGuard`: кросс-дедуп в Redis + пропуск известных пар.
 
-    def __init__(self, redis: Redis) -> None:
+    B-04: лот, уже существующий в БД в своей паре `(source, source_id)`,
+    дедупом не отбрасывается — это повторный фетч (апдейт цены/контента,
+    `last_seen_at`), а не межисточниковый дубль. `known_pairs` — множество
+    пар, предзапрошенное фасадом одним SELECT (см. `_known_pairs`).
+    """
+
+    def __init__(self, redis: Redis, known_pairs: frozenset[tuple[str, str]]) -> None:
         self._redis = redis
+        self._known_pairs = known_pairs
 
     async def is_duplicate(self, item: UnifiedListing) -> bool:
-        """`True`, если объявление уже встречалось (ключи выставляются)."""
+        """`True`, если НОВЫЙ лот дублирует другой источник (ключи ставятся)."""
+        if (item.source, str(item.source_id)) in self._known_pairs:
+            return False  # повторный фетч своей пары — доходит до upsert
         return await is_duplicate(self._redis, item)
+
+
+async def _known_pairs(
+    session: AsyncSession, items: list[UnifiedListing]
+) -> frozenset[tuple[str, str]]:
+    """Пары `(source, source_id)`, уже существующие в БД (одним запросом).
+
+    Победитель race «инсерт против инсерт» определяется уникальным
+    индексом; здесь достаточно read-committed снимка перед дедупом.
+    """
+    pairs = {(item.source, str(item.source_id)) for item in items}
+    if not pairs:
+        return frozenset()
+    rows = await session.execute(
+        select(Listing.source, Listing.source_id).where(
+            tuple_(Listing.source, Listing.source_id).in_(pairs)
+        )
+    )
+    return frozenset((row[0], str(row[1])) for row in rows.all())
 
 
 def _object_storage(storage: Any | None) -> ObjectStoragePort | None:
@@ -67,9 +96,18 @@ def _object_storage(storage: Any | None) -> ObjectStoragePort | None:
     return storage
 
 
-def _duplicate_guard(redis: Redis | None) -> DuplicateGuard | None:
-    """Гвард межИсточниковых дублей; `None` — проверка не нужна."""
-    return _RedisDuplicates(redis) if redis is not None else None
+async def _duplicate_guard(
+    session: AsyncSession, redis: Redis | None, items: list[UnifiedListing]
+) -> DuplicateGuard | None:
+    """Гвард межИсточниковых дублей; `None` — проверка не нужна.
+
+    Известные в БД пары `(source, source_id)` передаются гварду сразу:
+    повторные фетчи своих лотов дедуп не отбрасывает (B-04), кросс-сурс
+    дедуп остаётся только для НОВЫХ лотов.
+    """
+    if redis is None:
+        return None
+    return _RedisDuplicates(redis, await _known_pairs(session, items))
 
 
 def _legacy_stats(stats: IngestStats) -> dict[str, Any]:
@@ -95,7 +133,9 @@ async def save_listings(
 ) -> dict[str, Any]:
     """Сохраняет объявления с отслеживанием изменений (PLAN.md, фазы 1–2).
 
-    Cross-dup по Redis проверяется ДО записи в БД. Дальше — CTE-upsert
+    Cross-dup по Redis проверяется ДО записи в БД (B-04: только для НОВЫХ
+    лотов — повторный фетч известной пары `(source, source_id)` доходит до
+    upsert и обновляет цену/контент/`last_seen_at`). Дальше — CTE-upsert
     одним запросом (старые + новые значения сразу); точка цены пишется
     в listing_price_history при изменении пары (price, currency), для NEW —
     первая точка.
@@ -114,7 +154,7 @@ async def save_listings(
     use_case = IngestListings(
         SqlAlchemyListingsWriter(session),
         _object_storage(storage),
-        duplicates=_duplicate_guard(redis),
+        duplicates=await _duplicate_guard(session, redis, items),
         payload_of=raw_payload,
     )
     return _legacy_stats(await use_case.execute(items))

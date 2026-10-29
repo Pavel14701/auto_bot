@@ -55,6 +55,7 @@ import {
 } from "../../lib/chatApi";
 import { api } from "../../api/client";
 import type { User } from "../../api/types";
+import { apiErrorText } from "../../screens/apiErrorText";
 import { Message } from "./Message";
 import { useToast } from "../../ui/Toast";
 import { haptic } from "../../api/auth";
@@ -359,7 +360,8 @@ export function ChatRoom({ threadId, thread: threadProp, onBack, onThreadsChange
       const code = await createChatInvite(threadId);
       setInviteCode(code);
     } catch (e) {
-      toast.show(`Не удалось создать код: ${(e as Error).message}`, { error: true });
+      // сырой detail наружу не показываем (03 §3.2) — маппинг
+      toast.show(apiErrorText(e), { error: true });
     } finally {
       setInviteBusy(false);
     }
@@ -786,7 +788,9 @@ export function ChatRoom({ threadId, thread: threadProp, onBack, onThreadsChange
         )}
         {!room.loading && room.error && (
           <div className="chat-room__load-error" role="alert">
-            <span>{room.error}</span>
+            {/* стор хранит исходный текст — наружу отдаём через маппинг
+                (03 §3.2: без сырого английского detail/Failed to fetch) */}
+            <span>{apiErrorText(room.error)}</span>
             <button
               type="button"
               className="chat-room__retry"

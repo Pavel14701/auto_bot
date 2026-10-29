@@ -15,6 +15,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatEvent, ChatMessage } from "./chatSocket";
+import { createChatTransport } from "./chatSocket";
 import type { ChatThread } from "./chatApi";
 import { ChatStore, createTypingSender, type ChatStoreDeps } from "./chatStore";
 
@@ -121,6 +122,37 @@ describe("ChatStore: старт синхронизации (список + ли�
     expect(transport.setActiveThread).toHaveBeenCalledWith("t1", 11); // курсор = последний id
     store.closeThread("t1");
     expect(transport.setActiveThread).toHaveBeenCalledWith(null, 0);
+  });
+
+  it("BF-03: стор активирует канал у polling-транспорта — тик тянет список", async () => {
+    // Интеграция фабрика+стор: реальный UserChannelPollingTransport
+    // (forcePolling), listFetcher подменён DI. До фикса connectTransport
+    // не вызывал subscribe → active=false → tick() навсегда no-op.
+    const polled = vi.fn(async () => [th("p1"), th("p2")]);
+    const deps: ChatStoreDeps = {
+      fetchChats: vi.fn(async () => [th("t1")]),
+      fetchMessages: vi.fn(async () => ({ items: [], has_more: false })),
+      markRead: vi.fn(async () => undefined),
+      fetchMyUid: vi.fn(async () => 42),
+      createTransport: (target) =>
+        createChatTransport(target, {
+          forcePolling: true,
+          polling: { intervalMs: 5000, listFetcher: polled },
+        }),
+    };
+    const store = new ChatStore(deps);
+    store.startSync();
+    await flush();
+    await flush();
+    await flush();
+    // первый тик поллинга (сразу после connect) уже дёрнул GET /chats
+    expect(polled.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // каждый интервал — новый опрос списка (транспорт жив, не заглох)
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(polled.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // ответы поллинга доходывают до стора через onThreads
+    expect(store.getSnapshot().threads.has("p1")).toBe(true);
+    store.stopSync();
   });
 });
 

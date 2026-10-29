@@ -98,6 +98,10 @@ def make_adapter(
         return httpx.Response(200, text=body)
 
     transport = httpx.MockTransport(handler)
+    # По умолчанию обогащение деталей выключено: старые тесты считают
+    # запросы/страницы. Деталь-тесты включают сами через config.
+    if "config" not in kwargs:
+        kwargs["config"] = {"enrich_details": False}
     adapter = KolesaHtmlAdapter(
         source_name="kolesa",
         http_client=HttpClient(transport=transport, timeout=10),
@@ -317,4 +321,103 @@ async def test_fetch_raises_fetch_error_on_403():
     )
     with pytest.raises(FetchError):  # анти-бот отдаёт 403
         await adapter.fetch(SearchCriteria())
+    await adapter.close()
+
+
+# ---------- v2: детальные страницы (галерея/характеристики/опции) ----------
+
+_DETAIL_HTML = """
+<html><body>
+<div class="offer__parameters" data-test="offer-parameters">
+  <dl><dt class="value-title" title="Город"><span>Город</span></dt>
+      <dd class="value">Алматы</dd></dl>
+  <dl><dt class="value-title" title="Поколение"><span>Поколение</span></dt>
+      <dd class="value">2023 - н.в. XV80</dd></dl>
+  <dl><dt class="value-title" title="Кузов"><span>Кузов</span></dt>
+      <dd class="value">Седан</dd></dl>
+  <dl><dt class="value-title" title="Объем двигателя, л"><span>Объем</span></dt>
+      <dd class="value">2.5 (гибрид)</dd></dl>
+  <dl><dt class="value-title" title="Пробег"><span>Пробег</span></dt>
+      <dd class="value">9 300 км</dd></dl>
+  <dl><dt class="value-title" title="Коробка передач"><span>Коробка</span></dt>
+      <dd class="value">Вариатор</dd></dl>
+  <dl><dt class="value-title" title="Привод"><span>Привод</span></dt>
+      <dd class="value">Передний привод</dd></dl>
+  <dl><dt class="value-title" title="Цвет"><span>Цвет</span></dt>
+      <dd class="value">серый металлик</dd></dl>
+</div>
+<p class="offer__options">
+  <span class="offer__option-label">литые диски</span>
+  <span class="offer__option-label">тонировка</span>
+  <span class="offer__option-label">камера заднего вида</span>
+</p>
+<img src="https://kolesa-photos.kcdn.online/webp/aa/aaa-111/full-list-irrelevant.jpg">
+<img src="https://kolesa-photos.kcdn.online/webp/7a/7a8d5427-fa24-4ec6-97f6-a2f4ab756611/2-750x470.jpg">
+<img src="https://kolesa-photos.kcdn.online/webp/7a/7a8d5427-fa24-4ec6-97f6-a2f4ab756611/2-full.webp">
+<img src="https://kolesa-photos.kcdn.online/webp/93/932a9c82-baa4-43ae-a38a-a2b63b9e3e80/1-160x120.webp">
+<img src="https://kolesa-photos.kcdn.online/webp/93/932a9c82-baa4-43ae-a38a-a2b63b9e3e80/1-full.webp">
+<img src="https://kolesa-photos.kcdn.online/webp/93/932a9c82-baa4-43ae-a38a-a2b63b9e3e80/3-full.webp">
+</body></html>
+"""
+
+
+def _detail_handler(pages: list[str], detail: str):
+    """Транспорт: списки по очереди, любая /a/show/ — детальная страница."""
+    queue = list(pages)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/a/show/" in str(request.url):
+            return httpx.Response(200, text=detail)
+        return httpx.Response(200, text=queue.pop(0) if queue else _page())
+
+    return handler
+
+
+async def test_detail_enrichment_gallery_params_options():
+    """v2: детальная страница даёт галерею -full, словарные поля и опции."""
+    adapter = KolesaHtmlAdapter(
+        source_name="kolesa",
+        http_client=HttpClient(
+            transport=httpx.MockTransport(
+                _detail_handler([_page(CARD)], _DETAIL_HTML)
+            ),
+            timeout=10,
+        ),
+        config={"enrich_details": True, "detail_limit": 1},
+    )
+    result = await adapter.fetch(SearchCriteria())
+    item = result.items[0]
+    # галерея: полноразмерные, дедуп по номеру, сортировка по номеру
+    assert item.images == [
+        "https://kolesa-photos.kcdn.online/webp/93/932a9c82-baa4-43ae-a38a-a2b63b9e3e80/1-full.webp",
+        "https://kolesa-photos.kcdn.online/webp/7a/7a8d5427-fa24-4ec6-97f6-a2f4ab756611/2-full.webp",
+        "https://kolesa-photos.kcdn.online/webp/93/932a9c82-baa4-43ae-a38a-a2b63b9e3e80/3-full.webp",
+    ]
+    assert item.body_type == "sedan"
+    assert item.drive == "front"
+    assert item.color == "серый металлик"
+    assert item.generation == "2023 - н.в. XV80"
+    assert item.engine_volume == 2.5
+    assert item.fuel == "hybrid"
+    assert item.mileage_km == 9300
+    assert item.options == ["литые диски", "тонировка", "камера заднего вида"]
+    assert item.raw["detail_params"]["Руль"] if "Руль" in item.raw.get("detail_params", {}) else True
+    await adapter.close()
+
+
+async def test_detail_failure_does_not_break_page():
+    """Деталь 500 — объявление живёт с данными списка, fetch не падает."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/a/show/" in str(request.url):
+            return httpx.Response(500)
+        return httpx.Response(200, text=_page(CARD))
+
+    adapter = KolesaHtmlAdapter(
+        source_name="kolesa",
+        http_client=HttpClient(transport=httpx.MockTransport(handler), timeout=10),
+        config={"enrich_details": True, "detail_limit": 2},
+    )
+    result = await adapter.fetch(SearchCriteria())
+    assert len(result.items) >= 1
+    assert result.items[0].images  # фото списка остались
     await adapter.close()

@@ -22,7 +22,7 @@
  */
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SellCarScreen, SellFab } from "./SellCar";
@@ -115,12 +115,20 @@ function RouteProbe({ testid }: { testid: string }) {
   return <div data-testid={testid} />;
 }
 
+/** Зонд таба «Авто» сегмента «Мои объявления» (NAV-V2): показывает
+ *  полный адрес перехода — тесты BF-08 проверяют /auto?tab=mine. */
+function AutoMineProbe() {
+  const loc = useLocation();
+  return <div data-testid="auto-mine-route">{`${loc.pathname}${loc.search}`}</div>;
+}
+
 const renderScreen = () =>
   render(
     <MemoryRouter initialEntries={["/sell"]}>
       <Routes>
         <Route path="/sell" element={<SellCarScreen />} />
         <Route path="/listing/:id" element={<ListingProbe />} />
+        <Route path="/auto" element={<AutoMineProbe />} />
         <Route path="/profile" element={<RouteProbe testid="profile-route" />} />
       </Routes>
     </MemoryRouter>,
@@ -406,7 +414,10 @@ describe("SellCar v2: needs_payment → Stars-продление (§3)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Позже" }));
     expect(mocks.toastShow).toHaveBeenCalledWith("Лот сохранён — продлить можно в «Мои объявления»");
     expect(mocks.openInvoice).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    // BF-08: «Мои объявления» живут в табе Авто (NAV-V2), не в профиле
+    await waitFor(() =>
+      expect(screen.getByTestId("auto-mine-route").textContent).toBe("/auto?tab=mine"),
+    );
   });
 });
 
@@ -478,7 +489,7 @@ describe("SellCar v3: финальный шаг — черновик/публи�
     const [, options] = lotCalls()[0] as [string, RequestInit];
     expect(JSON.parse(String(options.body)).submit).toBe(false);
     expect(mocks.toastShow).toHaveBeenCalledWith("Черновик сохранён");
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("auto-mine-route")).toBeTruthy());
     // БД-черновик — отдельная сущность; sessionStorage-визард чист
     expect(sessionStorage.getItem("autobot.sellDraft")).toBeNull();
   });
@@ -491,7 +502,7 @@ describe("SellCar v3: финальный шаг — черновик/публи�
     fireEvent.click(screen.getByRole("button", { name: "Отправить на публикацию" }));
     await waitFor(() => expect(lotCalls()).toHaveLength(1));
     expect(mocks.toastShow).toHaveBeenCalledWith("Отправлено на проверку — результат придёт здесь");
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("auto-mine-route")).toBeTruthy());
     expect(screen.queryByTestId("listing-route")).toBeNull();
   });
 
@@ -509,7 +520,7 @@ describe("SellCar v3: финальный шаг — черновик/публи�
     expect(mocks.toastShow).toHaveBeenCalledWith("Объявление отклонено: Контакты в описании", {
       error: true,
     });
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("auto-mine-route")).toBeTruthy());
   });
 });
 
@@ -542,6 +553,7 @@ const renderEdit = (initial = "/sell?edit=7") =>
       <Routes>
         <Route path="/sell" element={<SellCarScreen />} />
         <Route path="/listing/:id" element={<ListingProbe />} />
+        <Route path="/auto" element={<AutoMineProbe />} />
         <Route path="/profile" element={<RouteProbe testid="profile-route" />} />
       </Routes>
     </MemoryRouter>,
@@ -599,14 +611,14 @@ describe("SellCar v3: edit-режим /sell?edit={id} (10 §5)", () => {
       country: "KZ", // гео предзаполнено из my-lots (GEO-V1 §2)
       city: "Алматы",
       price: 18_000_000,
-      currency: "KRW",
+      currency: "KZT",
       mileage_km: 42_000,
       description: "Описание лота",
       photos: ["https://s3/edit-1.jpg"],
     });
     // PATCH не запускает оплату — paid-шага нет, только тост и профиль
     expect(mocks.toastShow).toHaveBeenCalledWith("Правки отправлены на проверку");
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("auto-mine-route")).toBeTruthy());
   });
 
   it("draft-лот: «Сохранить черновик» — PATCH без submit-запроса", async () => {
@@ -626,7 +638,7 @@ describe("SellCar v3: edit-режим /sell?edit={id} (10 §5)", () => {
       ).toBe(true),
     );
     expect(mocks.toastShow).toHaveBeenCalledWith("Черновик сохранён");
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("auto-mine-route")).toBeTruthy());
     expect(apiMock.mock.calls.some(([p]) => p === "/market/lots/8/submit")).toBe(false);
   });
 
@@ -649,7 +661,7 @@ describe("SellCar v3: edit-режим /sell?edit={id} (10 §5)", () => {
       expect(apiMock.mock.calls.some(([p, o]) => p === "/market/lots/8/submit" && o?.method === "POST")).toBe(true),
     );
     expect(mocks.toastShow).toHaveBeenCalledWith("Отправлено на проверку — результат придёт здесь");
-    await waitFor(() => expect(screen.getByTestId("profile-route")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("auto-mine-route")).toBeTruthy());
   });
 
   it("patch_reject_reason лота показывается баннером в edit-режиме", async () => {
@@ -709,7 +721,7 @@ describe("SellCar: «✨ Сгенерировать описание» (12 §2)"
       model: "K5",
       year: 2022,
       price: 20_000_000,
-      currency: "KRW",
+      currency: "RUB", // UX-002: дефолт визарда — RU/RUB
       mileage_km: 35_000,
       fuel: "petrol",
       photos_count: 2,
@@ -868,6 +880,73 @@ describe("SellCar: гео лота — страна и город (GEO-V1)", () 
     fireEvent.click(screen.getByRole("button", { name: "← Назад" }));
     expect((screen.getByLabelText("Страна") as HTMLSelectElement).value).toBe("GE");
     expect((screen.getByLabelText("Город") as HTMLInputElement).value).toBe("Тбилиси");
+  });
+});
+
+// ---------- Валюта следует за страной продавца (UX-002/GEO) ----------
+
+describe("SellCar: валюта по стране (UX-002)", () => {
+  it("новый лот: дефолт RU → валюта RUB (не KRW), символ ₽ в превью", async () => {
+    renderScreen();
+    expect((screen.getByLabelText("Страна") as HTMLSelectElement).value).toBe("RU");
+    gotoPublish();
+    const cur = screen.getByLabelText("Валюта") as HTMLSelectElement;
+    expect(cur.value).toBe("RUB");
+    fillPrice("1500000");
+    // toLocaleString("ru-RU") даёт NBSP-разделители — нормализуем
+    const preview = document.querySelector(".sell-preview__price")?.textContent ?? "";
+    expect(preview.replace(/ /g, " ")).toContain("1 500 000 ₽");
+  });
+
+  it("смена страны подтягивает её валюту: KZ → KZT, BY → BYN, GE/AM → USD", async () => {
+    // Страна — шаг 1, валюта — шаг публикации: узел селекта страны после
+    // перехода detached, поэтому меняем страну ДО ухода с шага и сверяем
+    // валюту на публикации (независимый рендер на каждую страну).
+    for (const [code, cur] of [["KZ", "KZT"], ["BY", "BYN"], ["GE", "USD"]] as const) {
+      cleanup();
+      sessionStorage.removeItem("autobot.sellDraft"); // иначе рендер откроет шаг 3 прошлого черновика
+      renderScreen();
+      fireEvent.change(screen.getByLabelText("Страна"), { target: { value: code } });
+      fillStep1();
+      gotoPublish();
+      expect((screen.getByLabelText("Валюта") as HTMLSelectElement).value).toBe(cur);
+    }
+    // выбор страны уходит в сабмит вместе с её валютой
+    cleanup();
+    sessionStorage.removeItem("autobot.sellDraft");
+    renderScreen();
+    fireEvent.change(screen.getByLabelText("Страна"), { target: { value: "KZ" } });
+    fillStep1();
+    gotoPublish();
+    expect((screen.getByLabelText("Валюта") as HTMLSelectElement).value).toBe("KZT");
+    fillPrice("8000000");
+    fireEvent.click(screen.getByRole("button", { name: "Отправить на публикацию" }));
+    await waitFor(() => expect(lotCalls()).toHaveLength(1));
+    const body = JSON.parse(String((lotCalls()[0] as [string, RequestInit])[1].body));
+    expect(body.country).toBe("KZ");
+    expect(body.currency).toBe("KZT");
+  });
+
+  it("юзер может сменить валюту вручную после смены страны", async () => {
+    renderScreen();
+    fillStep1();
+    gotoPublish();
+    expect((screen.getByLabelText("Валюта") as HTMLSelectElement).value).toBe("RUB");
+    fireEvent.change(screen.getByLabelText("Валюта"), { target: { value: "EUR" } });
+    fillPrice();
+    fireEvent.click(screen.getByRole("button", { name: "Отправить на публикацию" }));
+    await waitFor(() => expect(lotCalls()).toHaveLength(1));
+    const body = JSON.parse(String((lotCalls()[0] as [string, RequestInit])[1].body));
+    expect(body.currency).toBe("EUR");
+  });
+
+  it("в списке валют: RUB/USD/EUR/KZT/BYN — KRW у источников недоступна", async () => {
+    renderScreen();
+    gotoPublish();
+    const values = Array.from(
+      (screen.getByLabelText("Валюта") as HTMLSelectElement).options,
+    ).map((o) => o.value);
+    expect(values).toEqual(["RUB", "USD", "EUR", "KZT", "BYN"]);
   });
 });
 

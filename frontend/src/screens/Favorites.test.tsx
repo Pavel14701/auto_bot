@@ -81,6 +81,25 @@ describe("FavoritesScreen", () => {
     expect(screen.getByText("Hyundai Staria")).toBeTruthy();
   });
 
+  it("BF-04: после апгрейда гостя (autobot:auth) гейт уходит и список грузится", async () => {
+    // Экран в keep-alive: гость открыл Избранное (гейт «Нужен вход»),
+    // вошёл через /login — App диспатчит autobot:auth, экран должен
+    // перечитать гостя и догрузить данные без F5.
+    vi.mocked(isGuest).mockReturnValue(true);
+    const { api } = await import("../api/client");
+    vi.mocked(api).mockResolvedValue([listing()]);
+    vi.mocked(api).mockClear(); // счётчик не должен тянуться из прошлого теста
+    renderScreen();
+    expect(screen.getByText("Нужен вход")).toBeTruthy();
+    expect(api).not.toHaveBeenCalled();
+
+    vi.mocked(isGuest).mockReturnValue(false); // вход выполнен
+    window.dispatchEvent(new Event("autobot:auth"));
+
+    await screen.findByText("Избранное: 1");
+    expect(screen.queryByText("Нужен вход")).toBeNull();
+  });
+
   it("пусто: текст 03 §2.7 + CTA «К ленте»", async () => {
     vi.mocked(isGuest).mockReturnValue(false);
     const { api } = await import("../api/client");

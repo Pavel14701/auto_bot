@@ -82,6 +82,9 @@ class _Result:
     def first(self):
         return self._row
 
+    def all(self):
+        return [self._row] if self._row is not None else []
+
 
 class UpsertSession:
     """Стаб сессии: execute() отдаёт заготовленные строки по очереди."""
@@ -93,6 +96,10 @@ class UpsertSession:
 
     async def execute(self, stmt, params=None):
         self.executed.append((str(stmt), params))
+        # known_pairs-SELECT (B-04) — своя ветка: его строки не смешиваются
+        # с очередью upsert-ответов; в этих тестах БД «пустая» для select.
+        if str(stmt).startswith("SELECT"):
+            return _Result(None)
         return _Result(self._queue.pop(0) if self._queue else None)
 
     async def commit(self):
@@ -216,6 +223,29 @@ async def test_unchanged_listing_not_queued_for_translation():
     assert stats["translate_ids"] == []  # хэш не менялся
 
 
+async def test_upsert_preserves_mirror_images_on_unchanged_lot():
+    """B-06: «unchanged»-лот (content_hash совпал) не откатывает S3-зеркала.
+
+    mirror_photos_task переписывает listings.images на зеркальные URL, не
+    трогая content_hash — следующий фетч апсерил тот же лот как unchanged и
+    раньше безусловно возвращал исходные URL (анти-хотлинк отваливался).
+    Зеркала сохраняются только у активного лота: реактивация исчезавшего
+    лота берёт исходные URL (зеркала очищены _purge_gone_storage), смена
+    hash — тоже (зеркало перезальётся).
+    """
+    session = UpsertSession([_row(_item())])
+    stats = await save_listings(session, None, [_item()])
+    assert stats["unchanged"] == 1
+    sql = session.executed[0][0]
+    assert "images = CASE" in sql
+    # CASE: активный лот + совпавший хэш + в БД зеркальные URL → не трогаем
+    assert "listings.is_active" in sql
+    assert "listings.content_hash = EXCLUDED.content_hash" in sql
+    assert "LIKE '%/mirror/%'" in sql
+    # безусловной перезаписи images больше нет (только ELSE-ветка CASE)
+    assert "images = EXCLUDED.images" not in sql
+
+
 async def test_content_change_requeues_translation():
     # mileage изменился → хэш изменился → тайтл мог измениться, переводим снова
     session = UpsertSession([_row(_item(mileage_km=60000), old_hash="b" * 64)])
@@ -247,12 +277,17 @@ async def test_reactivation_with_price_change_writes_point():
 async def test_cross_source_dup_checked_before_upsert():
     redis = _EvalRedis()
     first = UpsertSession([NEW_ROW])
-    await save_listings(first, redis, [_item()])
+    first_stats = await save_listings(first, redis, [_item()])
+    assert first_stats["new"] == 1  # БД пуста: claim прошёл, лот вставлен
 
+    # Кросс-дубль — НОВАЯ пара (encar,2) с тем же fuzzy-профилем: до upsert
+    # не доходит. Повторный фетч ИЗВЕСТНОЙ пары (encar,1) после B-04 доходит
+    # до upsert как update — это отдельная семантика (см. docstring B-04).
     second = UpsertSession([])
-    stats = await save_listings(second, redis, [_item()])
+    stats = await save_listings(second, redis, [_item(source_id="2")])
     assert stats["cross_dup"] == 1
-    assert second.executed == []  # до upsert дело не дошло
+    # из execute — только known_pairs-SELECT, upsert не зовётся
+    assert all(sql.startswith("SELECT") for sql, _ in second.executed)
 
 
 # ---------- mark_stale / stale_check_job (фаза 3) ----------
@@ -291,6 +326,8 @@ async def test_mark_stale_deactivates_and_skips_cb_sources():
     assert "source_health" in session.executed[0]  # CB-источники учтены
     assert "NOT IN" in session.executed[1]
     assert "disappeared_at" in session.executed[1] and "is_active" in session.executed[1]
+    # B-01: owner-лоты рынка (user/partner) не сталеют никогда
+    assert "owner_type IS NULL" in session.executed[1]
 
 
 async def test_mark_stale_without_cb_sources_no_not_in():
@@ -298,6 +335,7 @@ async def test_mark_stale_without_cb_sources_no_not_in():
     ids = await mark_stale(session, max_age_days=3)
     assert ids == [1]
     assert "NOT IN" not in session.executed[1]
+    assert "owner_type IS NULL" in session.executed[1]  # B-01: и без CB-фильтра
 
 
 async def test_stale_check_job_enqueues_gone(monkeypatch):
@@ -326,6 +364,134 @@ async def test_stale_check_job_enqueues_gone(monkeypatch):
     result = await fetch_mod.stale_check_job({})
     assert result == {"gone": 2}
     assert jobs == [("listing_status_scan", "gone", [5, 6])]
+
+
+# --- fetch_source_task: circuit breaker на абортнутой сессии (B-05) ---------
+
+
+async def test_fetch_rolls_back_before_record_error(monkeypatch):
+    """B-05: save_listings уронил транзакцию — record_error зовётся только
+    после rollback, иначе PendingRollbackError и error_streak не растёт
+    (circuit breaker никогда не открывается при DB-ошибках ингеста)."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.exc import PendingRollbackError
+
+    import app.infrastructure.workers.fetch as fetch_mod
+
+    class _Session:
+        def __init__(self) -> None:
+            self.rolled_back = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def rollback(self):
+            self.rolled_back = True
+
+    session = _Session()
+    recorded: dict = {}
+
+    async def fake_skip(sess, name):
+        return False
+
+    async def fake_save(sess, redis, items, storage=None):
+        raise RuntimeError("ingest exploded")
+
+    async def fake_record_error(sess, name, error):
+        # реальная record_error на абортнутой сессии умирает так же
+        if not sess.rolled_back:
+            raise PendingRollbackError("current transaction is aborted")
+        recorded["error"] = error
+
+    class _Adapter:
+        async def fetch(self, criteria, cursor):
+            return SimpleNamespace(items=[], has_more=False, next_cursor=None)
+
+    class _Registry:
+        def get(self, name):
+            return _Adapter()
+
+    monkeypatch.setattr(fetch_mod, "session_factory", lambda: session)
+    monkeypatch.setattr(fetch_mod, "should_skip_source", fake_skip)
+    monkeypatch.setattr(fetch_mod, "save_listings", fake_save)
+    monkeypatch.setattr(fetch_mod, "record_error", fake_record_error)
+
+    result = await fetch_mod.fetch_source_task(
+        {"registry": _Registry(), "redis": None}, "encar"
+    )
+    assert result["error"] == "ingest exploded"
+    assert session.rolled_back is True  # откат до записи здоровья источника
+    assert recorded["error"] == "ingest exploded"
+
+
+# --- fetch_source_task: release dedup-ключей при сбое upsert (B-10) ---------
+
+
+class _ClaimReleaseRedis(_EvalRedis):
+    """FakeRedis + `eval()` для обоих скриптов dedup.py: claim (SET) и release (DEL)."""
+
+    async def eval(self, script: str, numkeys: int, *args):
+        keys = [str(k) for k in args[:numkeys]]
+        if "DEL" in script:  # _RELEASE_SCRIPT
+            return sum(1 for k in keys if self.data.pop(k, None) is not None)
+        return await super().eval(script, numkeys, *args)
+
+
+async def test_fetch_releases_dedup_keys_when_upsert_fails(monkeypatch):
+    """B-10: upsert упал после claim — ключи дедупа отпущены (контракт
+    claim→release), иначе ретрай задачи выбросит пачку как cross_dup и
+    новые лоты не попадут в БД до конца TTL (48 ч)."""
+    from types import SimpleNamespace
+
+    import app.infrastructure.workers.fetch as fetch_mod
+
+    class _BrokenUpsertSession(UpsertSession):
+        """Сессия умирает на первом же upsert-запросе (транзакция aborted)."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def execute(self, stmt, params=None):
+            raise RuntimeError("current transaction is aborted")
+
+        async def rollback(self):
+            return None
+
+    session = _BrokenUpsertSession([])
+
+    class _Adapter:
+        async def fetch(self, criteria, cursor):
+            return SimpleNamespace(items=[_item()], has_more=False, next_cursor=None)
+
+    class _Registry:
+        def get(self, name):
+            return _Adapter()
+
+    async def fake_skip(sess, name):
+        return False
+
+    async def fake_record_error(sess, name, error):
+        return None  # изоляция: CB-путь покрыт тестом выше
+
+    monkeypatch.setattr(fetch_mod, "session_factory", lambda: session)
+    monkeypatch.setattr(fetch_mod, "should_skip_source", fake_skip)
+    monkeypatch.setattr(fetch_mod, "record_error", fake_record_error)
+
+    redis = _ClaimReleaseRedis()
+    result = await fetch_mod.fetch_source_task(
+        {"registry": _Registry(), "redis": redis}, "encar"
+    )
+    assert result["error"]  # исходная ошибка не потеряна
+    # claim внутри save_listings выставил fuzzy-ключ; сбой upsert обязан
+    # его отпустить — ретрай задачи пройдёт дедуп заново
+    assert redis.data == {}
 
 
 # --- Обогащение из detail encar (миграция 0017) ------------------------------

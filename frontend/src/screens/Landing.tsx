@@ -106,8 +106,8 @@ export function Landing({
         <div className="landing__logo" aria-hidden="true">🚗</div>
         <h1 className="landing__title">Auto Selection</h1>
         <p className="landing__sub">
-          Подбор автомобилей из Кореи и Китая: агрегатор объявлений,
-          AI-анализ цены и чеки осмотра.
+          Подбор автомобилей из Кореи, Китая, ОАЭ, США и Казахстана:
+          агрегатор объявлений, AI-анализ цены и чеки осмотра.
         </p>
       </div>
 

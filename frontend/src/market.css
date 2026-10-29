@@ -767,7 +767,7 @@
 /* Placement-подпись опубликованного лота — мелкая строка под пилюлей. */
 .mylot__placement {
   font-size: var(--font-xs);
-  color: var(--text-tertiary, var(--text-secondary));
+  color: var(--text-secondary, var(--text-secondary));
 }
 
 /* Качество объявления (12 §2): score-пилюля с пороговым цветом

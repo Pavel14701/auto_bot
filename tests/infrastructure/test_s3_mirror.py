@@ -38,20 +38,6 @@ class _Resp:
         return None
 
 
-class _Client:
-    def __init__(self, *a, **kw):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return None
-
-    async def get(self, url):
-        return _Resp()
-
-
 _ROWS = [(10, "encar", "111", ["u1", "u2"]), (11, "kcar", "222", ["a"])]
 _REPLACED: list = []
 
@@ -74,15 +60,27 @@ class _Sess:
     async def execute(self, *a, **kw):
         return _Exec(_ROWS)
 
+    async def commit(self):
+        return None
+
 
 def _patch_common(monkeypatch, rows=None):
     photos = _FakePhotos()
-    import httpx as _httpx
+    # SEC-01: зеркало качает через photos.download_photo (SSRF-гвард);
+    # в этих тестах проверяется логика задачи, сеть подменена стабом.
+    import app.infrastructure.storage.photos as phmod
 
-    monkeypatch.setattr(_httpx, "AsyncClient", _Client)
+    async def fake_download(url, **kw):
+        return b"\xff\xd8\xffimage", "jpg"
+
+    monkeypatch.setattr(phmod, "download_photo", fake_download)
     sess = _Sess()
     if rows is not None:
-        sess.execute = lambda *a, **kw: _Exec(rows)
+
+        async def _execute(*a, **kw):
+            return _Exec(rows)
+
+        sess.execute = _execute
     monkeypatch.setattr(fetch_mod, "session_factory", lambda: sess)
     return photos
 
@@ -96,10 +94,26 @@ async def test_mirror_task_full_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mirror_task_skips_existing(monkeypatch):
-    photos = _patch_common(monkeypatch)
-    photos.has.update({("encar", "111"), ("kcar", "222")})
+    """Скип — по зеркальным URL в БД (_is_mirrored, B-06), не по S3-head."""
+    rows = [
+        (10, "encar", "111", ["http://s3/mirror/encar/111/000.jpg"]),
+        (11, "kcar", "222", ["http://s3/mirror/kcar/222/000.jpg"]),
+    ]
+    photos = _patch_common(monkeypatch, rows=rows)
     res = await fetch_mod.mirror_photos_task({"photos_storage": photos}, "encar")
     assert res["mirrored"] == 0 and res["skipped"] == 2
+
+
+@pytest.mark.asyncio
+async def test_mirror_task_remirrors_after_hash_change(monkeypatch):
+    """B-06: объекты зеркала в S3 живы (has_mirror=True), но в БД исходные
+    URL — upsert при смене content_hash вернул исходники, и зеркало
+    перезаливается, а не скипается (раньше has_mirror глотал такие лоты)."""
+    photos = _patch_common(monkeypatch)  # _ROWS с исходными URL
+    photos.has.update({("encar", "111")})  # раньше этого хватало для скипа
+    res = await fetch_mod.mirror_photos_task({"photos_storage": photos}, "encar")
+    assert ("encar", "111", 0) in photos.mirrored
+    assert res["mirrored"] == 3
 
 
 @pytest.mark.asyncio

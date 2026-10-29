@@ -522,9 +522,11 @@ def _check_subscribe_token(token: str | None, settings: Settings) -> None:
     )
     api_key = settings.centrifugo_http_api_key.get_secret_value()
     provided = token or ""
+    # bytes: не-ASCII заголовок не должен ронять compare_digest TypeError-500
+    # (INFRA-04 аудита 2026-10-29; паттерн deps/internal._as_bytes)
     if not (
-        hmac.compare_digest(provided, expected)
-        or hmac.compare_digest(provided, api_key)
+        hmac.compare_digest(provided.encode(), expected.encode())
+        or hmac.compare_digest(provided.encode(), api_key.encode())
     ):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "Invalid internal token"

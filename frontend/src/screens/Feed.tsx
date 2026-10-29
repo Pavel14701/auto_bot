@@ -41,11 +41,11 @@ import {
 import { createPortal } from "react-dom";
 
 import { api } from "../api/client";
-import { useLocation, useNavigationType } from "react-router-dom";
+import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { ListingCard } from "../components/ListingCard";
 import { SkeletonList } from "../ui/Skeleton";
 import { EmptyState, ErrorState } from "../ui/States";
-import { KRW_PER_USD, digits } from "../lib/fx";
+import { digits } from "../lib/fx";
 import { FEED_COUNTRIES } from "../lib/geo";
 import {
   BODIES,
@@ -73,8 +73,11 @@ const SORTS: { key: SortKey; label: string; counter: string }[] = [
 const PAGE_SIZE = 20;
 
 /**
- * Критерии ленты. Цены — в $ (как на экране фильтров); в БД цены хранятся
- * в валюте источника (воны), поэтому в запросе конвертируются (buildParams).
+ * Критерии ленты. Цены — в $ (как на экране фильтров и в deep-link):
+ * контракт GET /listings — сравнение по usd_price, бэк сам нормализует
+ * валюту источников (listings_read._usd_price_expr). Конвертации на фронте
+ * НЕТ (BF-01: ×1350 ломал ценовые фильтры — пресеты шла вонах при
+ * долларовом сравнении на бэке).
  */
 interface FeedQuery {
   make?: string;
@@ -180,18 +183,17 @@ function sameQuery(a: FeedQuery, b: FeedQuery): boolean {
 const activeFields = (q: FeedQuery): number =>
   Object.values(q).filter((v) => v !== undefined && v !== "").length;
 
-/** $ → воны (цены в БД хранятся в валюте источника — encar/kcar, KRW). */
-const usdToKrw = (usd: string): string => String(Math.round(Number(usd) * KRW_PER_USD));
-
-/** Query-параметры GET /listings из критериев ленты (+ сортировка/лимиты). */
+/** Query-параметры GET /listings из критериев ленты (+ сортировка/лимиты).
+ *  Цены — в $ как есть (BF-01): бэк сравнивает по нормализованному
+ *  usd_price, конвертация на фронте давала фильтры ×1350. */
 function buildListParams(q: FeedQuery, sort: SortKey, offset: number, limit: number) {
   const params = new URLSearchParams();
   if (q.make) params.set("make", q.make);
   if (q.model) params.set("model", q.model);
   if (q.yearFrom) params.set("year_from", q.yearFrom);
   if (q.yearTo) params.set("year_to", q.yearTo);
-  if (q.priceMin) params.set("price_min", usdToKrw(q.priceMin));
-  if (q.priceMax) params.set("price_max", usdToKrw(q.priceMax));
+  if (q.priceMin) params.set("price_min", q.priceMin);
+  if (q.priceMax) params.set("price_max", q.priceMax);
   if (q.mileageMax) params.set("mileage_max", q.mileageMax);
   if (q.mileageMin) params.set("mileage_min", q.mileageMin);
   if (q.volumeMin) params.set("engine_volume_min", q.volumeMin);
@@ -240,9 +242,12 @@ export function resetFeedCache(): void {
  * Deep-link из бота («Открыть в ленте с фильтром») и из AI-поиска (A2):
  * /feed?make=Kia&model=Sorento&year_from=2020&price_max=25000&mileage_max=80000.
  * Читается при монтировании И при появлении параметров на смонтированном
- * экране (лента живёт в keep-alive и не размонтируется); query из URL сразу
- * очищается, чтобы рефреш/навигация не переактивировали фильтр повторно.
- * Цены — в $, как в FeedQuery (в запросе конвертируются в воны).
+ * экране (лента живёт в keep-alive и не размонтируется); query из URL
+ * вычищается на месте применения (router-навигацией replace), чтобы
+ * рефреш/навигация не переактивировали фильтр повторно.
+ * Известны ТОЛЬКО feed-ключи: чужие query (?tab=, /calc?price=, ?similar=)
+ * возвращают пустой набор и НЕ применяются (BF-02). Цены — в $, как в
+ * FeedQuery (и уходят в запрос как есть).
  */
 function deepLinkQuery(search: string): FeedQuery {
   const sp = new URLSearchParams(search);
@@ -267,13 +272,9 @@ function deepLinkQuery(search: string): FeedQuery {
     source: pick("source"),
     country: pick("country"),
   };
-  const clean = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(entries).filter(([, v]) => v !== undefined && v !== ""),
   ) as FeedQuery;
-  if (Object.keys(clean).length) {
-    window.history.replaceState({}, "", window.location.pathname);
-  }
-  return clean;
 }
 
 /** Лента активна (видима, не спрятана keep-alive): путь — ровно таб ленты. */
@@ -284,6 +285,7 @@ function isFeedTab(pathname: string): boolean {
 
 export function FeedScreen({ inactive = false }: { inactive?: boolean }) {
   const location = useLocation();
+  const navigate = useNavigate();
   const navType = useNavigationType(); // POP = назад/вперёд по истории
   const restore = useRef(
     feedMountedOnce && navType === "POP" ? feedCache : null,
@@ -298,9 +300,15 @@ export function FeedScreen({ inactive = false }: { inactive?: boolean }) {
     presets: PRESETS,
     signals: [],
   });
-  const [query, setQuery] = useState<FeedQuery>(
-    () => restore.current?.query ?? deepLinkQuery(location.search),
-  );
+  /** Deep-link с первого рендера (если был): после монтажа вычистим query
+   *  и из router-state (BF-10) — см. эффект ниже. */
+  const initialDeepLink = useRef<FeedQuery>({});
+  const [query, setQuery] = useState<FeedQuery>(() => {
+    if (restore.current) return restore.current.query;
+    const dl = deepLinkQuery(location.search);
+    initialDeepLink.current = dl;
+    return dl;
+  });
   const [sort, setSort] = useState<SortKey>(() => restore.current?.sort ?? "new");
   const [panelOpen, setPanelOpen] = useState(false);
   /** Хик: редкие поля шита свёрнуты; авто-раскрытие — если уже активны. */
@@ -348,14 +356,29 @@ export function FeedScreen({ inactive = false }: { inactive?: boolean }) {
     return () => document.body.classList.remove("feed-locked");
   }, [feedActive]);
 
-  // Динамические чипсы: пресеты + сохранённые фильтры (ТЗ §2.2)
-  useEffect(() => {
+  // Динамические чипсы: пресеты + сохранённые фильтры (ТЗ §2.2).
+  // BF-15: лента живёт в keep-alive — после апгрейда гостя (autobot:auth)
+  // /filters перечитываем, иначе чипсы 🔔 «Мои сигналы» не появятся до F5.
+  const loadChips = useCallback(() => {
     api<UserFilter[]>("/filters")
       .then((filters) => setChips(buildChips(filters)))
       .catch(() => setChips(buildChips([])));
   }, []);
+  useEffect(() => {
+    loadChips();
+    const onAuth = () => loadChips();
+    window.addEventListener("autobot:auth", onAuth);
+    return () => window.removeEventListener("autobot:auth", onAuth);
+  }, [loadChips]);
+
+  /** Счётчик запросов (BF-07): ответ устаревшего запроса (фильтр сменился
+   *  во время полёта догрузки/перезагрузки) игнорируется — чужие карточки
+   *  не приклеиваются к новому списку, busy/loading сбрасывает только
+   *  актуальный запрос. */
+  const loadSeq = useRef(0);
 
   const load = useCallback(async (q: FeedQuery, reset: boolean) => {
+    const seq = ++loadSeq.current;
     busyRef.current = true;
     if (reset) setLoading(true);
     else setLoadingMore(true);
@@ -364,16 +387,20 @@ export function FeedScreen({ inactive = false }: { inactive?: boolean }) {
     try {
       const params = buildListParams(q, sortRef.current, reset ? 0 : offsetRef.current, PAGE_SIZE);
       const data = await api<ListingList>(`/listings?${params.toString()}`);
+      if (seq !== loadSeq.current) return; // гонка: актуален уже другой запрос
       setTotal(data.total);
       setItems((prev) => (reset ? data.items : [...prev, ...data.items]));
       offsetRef.current = reset ? data.items.length : offsetRef.current + data.items.length;
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError((e as Error).message);
       errorRef.current = true;
     } finally {
-      setLoading(false);
-      setLoadingMore(false);
-      busyRef.current = false;
+      if (seq === loadSeq.current) {
+        setLoading(false);
+        setLoadingMore(false);
+        busyRef.current = false;
+      }
     }
     // sort в deps: смена сортировки перезагружает ленту с первой страницы
   }, [sort]);
@@ -385,15 +412,33 @@ export function FeedScreen({ inactive = false }: { inactive?: boolean }) {
 
   // Deep-link на уже смонтированной ленте: экран живёт в keep-alive и не
   // размонтируется при переходах, поэтому критерии из URL применяем при
-  // каждом их появлении — иначе «Показать в ленте» из AI-поиска (A2) и
+  // каждом их появлении — иначе «Показать в ленту» из AI-поиска (A2) и
   // ссылки из бота молча игнорировались бы после первого рендера.
+  // BF-02: применяем ТОЛЬКО известные feed-ключи и только на пути ленты:
+  // чужие query (?tab=, /calc?price=, ?similar=) дают пустой набор и
+  // фильтры ленты не сбрасывают (раньше setQuery({}) обнулял их).
   const appliedSearch = useRef(location.search);
   useEffect(() => {
     if (location.search === appliedSearch.current) return;
     appliedSearch.current = location.search;
-    if (!location.search) return; // «просто /» текущие фильтры не сбрасывает
-    setQuery(deepLinkQuery(location.search));
-  }, [location.search]);
+    if (!location.search || !isFeedTab(location.pathname)) return;
+    const clean = deepLinkQuery(location.search);
+    if (!Object.keys(clean).length) return; // только чужие ключи — игнор
+    setQuery(clean);
+    // BF-10: вычищаем query и из router-state (replace), а не только из
+    // window.history: иначе роутер «думает», что search не изменился, и
+    // повторный deep-link с теми же критериями молча игнорируется.
+    navigate(location.pathname, { replace: true });
+  }, [location.search, location.pathname, navigate]);
+
+  // Deep-link с первого рендера потреблён в инициализаторе query — чистим
+  // query и в router-state (BF-10, ветка монтажа), чтобы appliedSearch выше
+  // был синхронен с реальным URL с самого старта.
+  useEffect(() => {
+    if (!Object.keys(initialDeepLink.current).length) return;
+    navigate(location.pathname, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только монтаж
+  }, []);
 
   // Возврат из карточки: восстановить позицию скролла ОБЛАСТИ ленты
   // (window больше не скроллится — крутится .feed-scroll)

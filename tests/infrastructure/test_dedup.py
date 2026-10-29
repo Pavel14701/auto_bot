@@ -18,14 +18,22 @@ from tests.conftest import FakeRedis
 
 
 class _EvalRedis(FakeRedis):
-    """FakeRedis + `eval()` для Lua-скриптов claim/release из dedup.py."""
+    """FakeRedis + `eval()` для Lua-скриптов claim/release из dedup.py.
+
+    Повторяет `_CLAIM_SCRIPT` (B-04): src-ключи своего источника — проход
+    (повторный фетч), кросс-ключи — дубль; иначе выставить всё с TTL.
+    """
 
     async def eval(self, script: str, numkeys: int, *args):
         keys = [str(k) for k in args[:numkeys]]
-        if "EXISTS" in script:  # _CLAIM_SCRIPT: все или ничего
+        if "EXISTS" in script:  # _CLAIM_SCRIPT
+            nsrc = int(args[numkeys]) if len(args) > numkeys else 0
+            ttl = int(args[numkeys + 1]) if len(args) > numkeys + 1 else None
+            src_keys, cross_keys = keys[:nsrc], keys[nsrc:]
+            if any(k in self.data for k in src_keys):
+                return 1  # свой источник уже фетчил лот — не дубль
             if any(k in self.data for k in keys):
-                return 0
-            ttl = int(args[numkeys]) if len(args) > numkeys else None
+                return 0  # кросс-ключ занят другим источником
             for key in keys:
                 self.data[key] = "1"
                 if ttl:
@@ -77,7 +85,13 @@ def test_fuzzy_key_different_car():
 
 async def test_is_duplicate_first_time_false(fake_redis: FakeRedis):
     assert await is_duplicate(fake_redis, _listing(vin="VIN123")) is False
-    assert await is_duplicate(fake_redis, _listing(vin="VIN123")) is True
+    # B-04: повторный фетч того же лота СВОИМ источником — не дубль
+    # (апдейт цены/контента должен доходить до upsert, а не ждать TTL).
+    assert await is_duplicate(fake_redis, _listing(vin="VIN123")) is False
+    # другой источник с тем же VIN — межисточниковый дубль.
+    assert await is_duplicate(
+        fake_redis, _listing(vin="VIN123", source="kcar", source_id="42")
+    ) is True
 
 
 async def test_is_duplicate_cross_source(fake_redis: FakeRedis):
@@ -87,19 +101,33 @@ async def test_is_duplicate_cross_source(fake_redis: FakeRedis):
     assert await is_duplicate(fake_redis, second) is True
 
 
+async def test_same_source_refetch_not_dropped(fake_redis: FakeRedis):
+    """B-04: повторный фетч того же (source, source_id) проходит к upsert."""
+    first = _listing(vin="KMHxx", source="encar", source_id="100")
+    assert await claim(fake_redis, first) is True
+    # тот же лот повторно (цена могла измениться) — не отбрасывать.
+    again = _listing(vin="KMHxx", source="encar", source_id="100", price=1)
+    assert await claim(fake_redis, again) is True
+    # а новый лот другого источника с тем же VIN — дубль.
+    assert await claim(
+        fake_redis, _listing(vin="KMHxx", source="kcar", source_id="900")
+    ) is False
+
+
 
 # tests/core/test_dedup.py
 
 @pytest.mark.asyncio
 async def test_partial_claim_does_not_poison_vin(fake_redis):
-    """Регрессия: при дубле по fuzzy VIN не должен оставаться занятым."""
+    """Регрессия: при кросс-дубле по fuzzy VIN не должен оставаться занятым."""
     a = _listing(vin="1HGCM", make="Toyota", model="Camry", year=2020,
                  mileage_km=50000, price=20000)
     assert await claim(fake_redis, a) is True
 
-    b = _listing(vin="2XYZ", make="Toyota", model="Camry", year=2020,
+    b = _listing(vin="2XYZ", source="kcar", source_id="8", make="Toyota",
+                 model="Camry", year=2020,
                  mileage_km=50000, price=20000)  # другой VIN, те же цифры
-    assert await claim(fake_redis, b) is False  # дубль по fuzzy
+    assert await claim(fake_redis, b) is False  # кросс-дубль по fuzzy
 
     # VIN 2XYZ не должен быть занят: следующий листинг с этим VIN — новый
     c = _listing(vin="2XYZ", make="Honda", model="Accord", year=2021,
@@ -161,8 +189,25 @@ def test_fuzzy_case_and_whitespace():
 
 @pytest.mark.asyncio
 async def test_concurrent_claim_one_wins(fake_redis):
-    """Lua атомарен: из двух параллельных claim только один вернёт True."""
+    """Lua атомарен: параллельный claim двух источников — один выигрывает."""
     l = _listing(vin="1HGCM", make="Toyota", model="Camry", year=2020,
                  mileage_km=50000, price=20000)
-    results = await asyncio.gather(claim(fake_redis, l), claim(fake_redis, l))
+    other = _listing(vin="1HGCM", source="kcar", source_id="7",
+                     make="Toyota", model="Camry", year=2020,
+                     mileage_km=50000, price=20000)
+    results = await asyncio.gather(claim(fake_redis, l), claim(fake_redis, other))
     assert sorted(results) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refetch_same_source_both_pass(fake_redis):
+    """B-04: параллельные повторные фетчи СВОЕГО лота оба проходят."""
+    l = _listing(vin="1HGCM", make="Toyota", model="Camry", year=2020,
+                 mileage_km=50000, price=20000)
+    twin = _listing(vin="1HGCM", source_id="1",
+                    make="Toyota", model="Camry", year=2020,
+                    mileage_km=50000, price=21000)
+    first = await claim(fake_redis, l)
+    results = await asyncio.gather(claim(fake_redis, twin), claim(fake_redis, l))
+    assert first is True
+    assert results == [True, True]  # src-ключ стоит — повтор не дропается

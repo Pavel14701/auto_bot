@@ -1,16 +1,17 @@
 /**
- * Калькулятор доставки Корея → РФ/РБ («под ключ»): авто + море + брокер +
- * СБКТС/ЭПТС + пошлина + сбор + утильсбор. Префилл из query (?price=&cc=&year=&cur=).
- * Юрисдикция следует за валютой объявления: BYN → РБ, RUB → РФ (можно переключить).
+ * Калькулятор доставки от страны отправки → РФ/РБ («под ключ»): авто + море +
+ * брокер + СБКТС/ЭПТС + пошлина + сбор + утильсбор. Префилл из query
+ * (?price=&cc=&year=&cur=&country=). Юрисдикция следует за валютой
+ * объявления: BYN → РБ, RUB → РФ (можно переключить).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { haptic } from "../api/auth";
 import { type Region, getRegion, setRegion } from "../lib/fx";
-import { FEED_COUNTRIES, countryFlag, countryName } from "../lib/geo";
+import { COUNTRY_BY_CODE, FEED_COUNTRIES, countryFlag, countryName } from "../lib/geo";
 import { BackButton } from "../ui/BackButton";
 import { SkeletonCard } from "../ui/Skeleton";
 import { apiErrorText } from "./apiErrorText";
@@ -78,13 +79,21 @@ function regionFromParams(params: URLSearchParams): Region {
   return getRegion();
 }
 
+/** Страна отправки из query ?country= (GEO-V1 §3, deep-link из PDP):
+ *  ISO2-код из справочника (регистр не важен); нет/неизвестна → null. */
+function countryParam(params: URLSearchParams): string | null {
+  const co = (params.get("country") ?? "").trim().toUpperCase();
+  return COUNTRY_BY_CODE[co] ? co : null;
+}
+
 export function CalcScreen() {
   const [params] = useSearchParams();
   const [region, setRegionState] = useState<Region>(() => regionFromParams(params));
-  /** Страна отправки (GEO-V1 §2): DeliveryIn.country, дефолт KR — как
-   *  раньше считали «Корея → Владивосток»; ставки логистики по странам
+  /** Страна отправки (GEO-V1 §2): DeliveryIn.country; дефолт KR — как
+   *  раньше считали «Корея → Владивосток»; deep-link из PDP (?country=)
+   *  подставляет страну лота (UX-003). Ставки логистики по странам
    *  выбирает бэк, фронт только шлёт код и показывает маршрут. */
-  const [country, setCountryState] = useState("KR");
+  const [country, setCountryState] = useState(() => countryParam(params) ?? "KR");
   const [price, setPrice] = useState(params.get("price") ?? "");
   const [cc, setCc] = useState(params.get("cc") ?? "2000");
   const [hp, setHp] = useState(params.get("hp") ?? "");
@@ -133,22 +142,34 @@ export function CalcScreen() {
 
   // Префилл из deep-link (кнопка «Доставка и растаможка» в PDP). Экран живёт
   // в keep-alive и не размонтируется между заходами: применяем параметры при
-  // каждом их изменении в адресе, а не только при первом монтировании —
-  // иначе второй лот из карточки считался бы со старой ценой.
+  // каждом РЕАЛЬНОМ изменении адреса (сравниваем строку search) — второй лот
+  // из карточки считается с новой ценой. Смена страны/региона ВНУТРИ экрана
+  // адрес не меняет: протухшие ?price=/?year= не перечитываются и не
+  // откатывают ручной ввод вторым параллельным расчётом (BF-06).
+  const appliedSearchRef = useRef<string | null>(null);
+  const countryRef = useRef(country);
+  countryRef.current = country;
   useEffect(() => {
+    const key = params.toString();
+    if (appliedSearchRef.current === key) return;
+    appliedSearchRef.current = key;
+    // страна лота (?country=, UX-003): выбирается чипсом даже без ?price=
+    const coParam = countryParam(params);
+    if (coParam) setCountryState(coParam);
     const priceParam = params.get("price");
     if (!priceParam) return;
     const ccParam = params.get("cc") ?? "2000";
     const hpParam = params.get("hp") ?? "";
     const yearParam = params.get("year") ?? String(new Date().getFullYear() - 3);
+    const r = regionFromParams(params);
+    const co = coParam ?? countryRef.current; // без ?country= — текущая страна
     setPrice(priceParam);
     setCc(ccParam);
     setHp(hpParam);
     setYear(yearParam);
-    const r = regionFromParams(params);
     setRegionState(r);
-    void calc(priceParam, ccParam, hpParam, yearParam, r, country);
-  }, [params, calc, country]);
+    void calc(priceParam, ccParam, hpParam, yearParam, r, co);
+  }, [params, calc]);
 
   const pickRegion = (r: Region) => {
     haptic("light");
@@ -178,10 +199,10 @@ export function CalcScreen() {
         <BackButton />
         <div>
           <div className="feed-header__title">🚚 Доставка «под ключ»</div>
+          {/* Маршрут — из ответа DeliveryOut.route (бэк знает порты страны
+              отправки); пока расчёта нет — прочерк вместо хардкода портов */}
           <div className="feed-header__counter">
-            {region === "by"
-              ? `${countryName(country) || "Корея"} → Владивосток → Минск`
-              : `${countryName(country) || "Корея"} → Владивосток → вам`}
+            {`${countryName(country) || "Корея"} → ${result?.route ?? "—"}`}
           </div>
         </div>
       </div>
@@ -364,10 +385,14 @@ export function CalcScreen() {
             </div>
           )}
 
+          {/* Маршрут из DeliveryOut.route (UX-003): без хардкода портов —
+              для ОАЭ бэк отдаёт «Дубай → Новороссийск», для Кореи — Пусан */}
           <div className="calc-note">
-            {result.region === "by"
-              ? "🚢 Море Бусан → Владивосток, далее перегон/автовоз до Минска — менеджер подберёт маршрут и сроки."
-              : "🚢 Море Бусан → Владивосток, далее по РФ — менеджер подберёт маршрут и точные сроки."}
+            {result.route
+              ? result.region === "by"
+                ? `🚢 ${result.route}, далее перегон/автовоз до Минска — менеджер подберёт маршрут и сроки.`
+                : `🚢 ${result.route}, далее по РФ — менеджер подберёт маршрут и точные сроки.`
+              : "🚢 Морской маршрут и перегон — точный путь подберёт менеджер."}
           </div>
         </div>
       )}

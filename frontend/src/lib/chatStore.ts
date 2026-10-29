@@ -495,9 +495,10 @@ export class ChatStore {
     const uid = await this.deps.fetchMyUid();
     if (uid == null || !this.syncing || this.transport) return;
     this.myUid = uid;
+    const channel = userChannel(uid);
     let t: UserChannelTransport | null = null;
     try {
-      t = await this.deps.createTransport({ userChannel: userChannel(uid) });
+      t = await this.deps.createTransport({ userChannel: channel });
     } catch {
       t = null; // совсем без транспорта: список уже грузится loadThreads-ом
     }
@@ -509,6 +510,11 @@ export class ChatStore {
     this.offEvent = t.onEvent((ev) => this.handleEvent(ev));
     // фоллбэк-поллинг обновляет список тредов; ws-режим — заглушка
     this.offThreads = t.onThreads((raw) => this.applyPolledThreads(raw));
+    // BF-03: активируем личный канал ДО connect — поллинг-транспорт без
+    // подписки навсегда неактивен (tick() выходит при !active: ни список
+    // тредов, ни after_id не опрашиваются). ws-режим подписан фабрикой
+    // сам (createChatTransport), повторная подписка идемпотентна.
+    t.subscribe(channel);
     await t.connect().catch(() => undefined);
     this.syncActiveThread();
   }

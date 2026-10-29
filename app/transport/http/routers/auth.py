@@ -468,12 +468,15 @@ async def auth_guest(
 
     Защита (TECHDEBT 1.4): фиксированное окно в Redis — не более
     `GUEST_IP_RATE_LIMIT` (по умолчанию 5) созданий сессий в минуту
-    с одного IP (`X-Forwarded-For`, иначе client host); превышение — 429.
+    с одного IP (AUTH-01: `X-Real-IP` или правый хоп `X-Forwarded-For`
+    — их ставит доверенный прокси, левую часть XFF клиент подделывает;
+    иначе client host); превышение — 429.
     """
     settings = get_settings()
     ip = client_ip(
         request.headers.get("x-forwarded-for"),
         request.client.host if request.client else None,
+        request.headers.get("x-real-ip"),
     )
     if not await guest_ip_allowed(
         redis, ip, limit=settings.guest_ip_rate_limit

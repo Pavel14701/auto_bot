@@ -112,6 +112,9 @@ export function ProfileScreen() {
   }, [load]);
 
   const buy = async (tier: "pro" | "business", period: "month" | "year") => {
+    // RACE-01 (аудит 2026-10-29): один инвойс за раз — блокируем ВСЕ кнопки
+    // покупки, не только нажатую (два открытых счёта Stars = два списания).
+    if (buying !== null) return;
     const key = `${tier}_${period}`;
     setBuying(key);
     setMessage(null);
@@ -246,16 +249,16 @@ export function ProfileScreen() {
               business — уже максимум, покупок нет */}
           {rank < TIER_RANK.pro && (
             <>
-              <button className="btn btn--primary" disabled={buying === "pro_month"} onClick={() => buy("pro", "month")}>
+              <button className="btn btn--primary" disabled={buying !== null} onClick={() => buy("pro", "month")}>
                 {buying === "pro_month" ? "Оформляем…" : `⭐ Pro — ${price("pro_month", 500)}★/мес`}
               </button>
-              <button className="btn" disabled={buying === "pro_year"} onClick={() => buy("pro", "year")}>
+              <button className="btn" disabled={buying !== null} onClick={() => buy("pro", "year")}>
                 {buying === "pro_year" ? "Оформляем…" : `⭐ Pro — ${price("pro_year", 4800)}★/год (−20%)`}
               </button>
             </>
           )}
           {rank < TIER_RANK.business && (
-            <button className="btn" disabled={buying === "business_month"} onClick={() => buy("business", "month")}>
+            <button className="btn" disabled={buying !== null} onClick={() => buy("business", "month")}>
               {buying === "business_month" ? "Оформляем…" : `⭐ Business — ${price("business_month", 2500)}★/мес`}
             </button>
           )}
@@ -406,6 +409,7 @@ export function ProfileScreen() {
           {(["ru", "by"] as const).map((r) => (
             <button
               key={r}
+              aria-pressed={region === r}
               className={region === r ? "chip chip--active" : "chip"}
               onClick={() => {
                 haptic("light");

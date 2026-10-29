@@ -131,6 +131,7 @@ export function CompareScreen() {
         <div className="chip-row" role="group" aria-label="Юрисдикция сравнения">
           <button
             type="button"
+            aria-pressed={region === "ru"}
             className={region === "ru" ? "chip chip--active" : "chip"}
             onClick={() => pickRegion("ru")}
           >
@@ -138,6 +139,7 @@ export function CompareScreen() {
           </button>
           <button
             type="button"
+            aria-pressed={region === "by"}
             className={region === "by" ? "chip chip--active" : "chip"}
             onClick={() => pickRegion("by")}
           >

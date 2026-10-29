@@ -9,6 +9,7 @@ import {
   webLogin,
   webRegister,
 } from "../api/auth";
+import { apiErrorText } from "./apiErrorText";
 
 interface Props {
   onAuthed: () => void;
@@ -70,9 +71,7 @@ export function LoginScreen({ onAuthed }: Props) {
       setError(
         e instanceof Error && e.message.includes("503")
           ? "Вход через Telegram сейчас недоступен — используйте email."
-          : e instanceof Error
-            ? e.message
-            : "Ошибка сети",
+          : apiErrorText(e),
       );
     } finally {
       setBusy(false);
@@ -90,7 +89,9 @@ export function LoginScreen({ onAuthed }: Props) {
       }
       onAuthed();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Ошибка сети");
+      // 401 Invalid credentials / 409 Email already registered / сеть —
+      // по маппингу 03 §3.2 (сырой detail наружу не показываем)
+      setError(apiErrorText(e));
     } finally {
       setBusy(false);
     }
@@ -109,12 +110,16 @@ export function LoginScreen({ onAuthed }: Props) {
 
       <div className="auth__tabs" role="tablist">
         <button
+          role="tab"
+          aria-selected={mode === "login"}
           className={mode === "login" ? "auth__tab auth__tab--active" : "auth__tab"}
           onClick={() => setMode("login")}
         >
           Вход
         </button>
         <button
+          role="tab"
+          aria-selected={mode === "register"}
           className={mode === "register" ? "auth__tab auth__tab--active" : "auth__tab"}
           onClick={() => setMode("register")}
         >
@@ -160,7 +165,7 @@ export function LoginScreen({ onAuthed }: Props) {
           className="btn btn--primary btn--block"
           disabled={busy || !email || password.length < (mode === "register" ? 8 : 1)}
         >
-          {busy ? "Секунду…" : mode === "register" ? "Зарегистрироваться" : "Войти"}
+          {busy ? (mode === "register" ? "Регистрируем…" : "Входим…") : mode === "register" ? "Зарегистрироваться" : "Войти"}
         </button>
 
         <div className="auth__divider"><span>или</span></div>

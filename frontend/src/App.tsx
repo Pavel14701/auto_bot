@@ -282,15 +282,36 @@ function OverlayRoutes({ guest }: { guest: boolean }) {
  *  вход», ничего не запирает). В Telegram и по deep-link'ам с query
  *  (/?make=…) сразу открывается приложение — лишний экран не встаёт на
  *  пути сценария. Вернуться на лендинг из приложения: Профиль →
- *  «Сменить поверхность». */
+ *  «Сменить поверхность».
+ *
+ * BF-09: лендинг и приложение раньше жили на ОДНОЙ записи истории «/» —
+ * браузерный «Назад» из приложения покидал сайт. Вход пушит вторую запись
+ * с маркером {app:1}: Назад попадает на запись лендинга (state=null) —
+ * лендинг показывается снова без перезагрузки; «Вперёд» возвращает
+ * приложение. Внутренние переходы приложения пушат свои записи (state
+ * без маркера app) — popstate по ним гейт не трогает. */
 function LandingGate() {
   const [entered, setEntered] = useState(false);
+
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const s = e.state as { app?: number } | null;
+      if (s === null) setEntered(false); // вернулись на запись лендинга
+      else if (s && s.app) setEntered(true); // вперёд/назад на запись приложения
+      // остальные записи (внутренняя навигация MiniApp) — не наше дело
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   if (entered) return <MiniApp />;
   return (
     <AppRoot appearance={applyTheme()}>
       <Landing
         onChooseUser={() => {
           chooseSurface("user");
+          // Вторая запись истории: [лендинг state=null, приложение {app:1}]
+          window.history.pushState({ app: 1 }, "", "/");
           setEntered(true); // Mini App без перезагрузки страницы
         }}
       />

@@ -5,10 +5,30 @@ from app.infrastructure.security.ip_limit import client_ip, guest_ip_allowed
 from tests.conftest import FakeRedis
 
 
-def test_client_ip_prefers_forwarded_for():
-    assert client_ip("1.2.3.4, 10.0.0.1", "testclient") == "1.2.3.4"
+def test_client_ip_takes_last_forwarded_hop():
+    """AUTH-01: берём ПРАВЫЙ IP цепочки XFF — его дописал доверенный прокси.
+
+    Спуф-префикс клиента слева («1.2.3.4, ...») не должен подменять ключ
+    лимита: реальный клиент — последний элемент.
+    """
+    assert client_ip("1.2.3.4, 203.0.113.9", "testclient") == "203.0.113.9"
+    assert client_ip("1.2.3.4", None) == "1.2.3.4"  # один хоп — как есть
+    # пустые элементы цепочки пропускаются справа налево
+    assert client_ip("1.2.3.4, , 203.0.113.9,", None) == "203.0.113.9"
+
+
+def test_client_ip_prefers_real_ip():
+    """X-Real-IP (его ставит наш nginx) приоритетнее XFF."""
+    assert (
+        client_ip("1.2.3.4, 10.0.0.1", "testclient", real_ip="203.0.113.7")
+        == "203.0.113.7"
+    )
+
+
+def test_client_ip_fallbacks():
     assert client_ip(None, "5.6.7.8") == "5.6.7.8"
     assert client_ip(None, None) == "unknown"
+    assert client_ip("", "  ") == "unknown"
 
 
 async def test_guest_ip_allowed_within_limit():

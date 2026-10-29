@@ -23,6 +23,7 @@ import { countryFlag, countryName } from "../lib/geo";
 import { qualityTone } from "../lib/listingQuality";
 import { listingStatusToast, useListingStatus } from "../lib/chatStore";
 import { useToast } from "../ui/Toast";
+import { apiErrorText } from "./apiErrorText";
 import "../market.css";
 import type { LotSubmitResult, MyLot, PlacementInvoice } from "../api/types";
 
@@ -155,7 +156,7 @@ export function MyLotsPanel() {
       toast.show(
         status === 503
           ? "🛠 Платежи временно недоступны — попробуйте через пару минут"
-          : `Не удалось создать счёт: ${(e as Error).message}`,
+          : apiErrorText(e), // 03 §3.2: сырой detail наружу не показываем
         { error: true },
       );
       return;

@@ -15,7 +15,7 @@
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useParams, useLocation } from "react-router-dom";
 import { AppRoot } from "@telegram-apps/telegram-ui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -119,6 +119,13 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
 });
+
+
+/** Зонд роута /calc: показывает строку ?query перехода (UX-003). */
+function CalcProbe() {
+  const loc = useLocation();
+  return <div data-testid="calc-route">{loc.search}</div>;
+}
 
 const renderScreen = () =>
   render(
@@ -248,6 +255,87 @@ describe("«Связаться с менеджером» (POST /listings/{id}/co
     expect((sent.closest("button") as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole("button", { name: "Связаться с менеджером" })).toBeNull();
     expect(contactCalls()).toHaveLength(0);
+  });
+});
+
+// ---------- Sticky-бар мобайла (UX-004) и ссылка в калькулятор (UX-003) ----------
+
+describe("PDP: sticky-бар мобайла (UX-004)", () => {
+  it("primary бара — действие экрана «Связаться», «Открыть у источника» — текстовая ссылка", async () => {
+    renderScreen();
+    await screen.findByText("Hyundai Sonata");
+    const bar = document.querySelector(".listing-cta-bar") as HTMLElement;
+    expect(bar).not.toBeNull();
+    const primary = bar.querySelector(".listing-cta-bar__btn") as HTMLButtonElement;
+    expect(primary.textContent).toContain("Связаться");
+    // «Открыть у источника» больше не primary-кнопка, а secondary-ссылка
+    const src = bar.querySelector(".listing-cta-bar__src") as HTMLElement;
+    expect(src?.textContent).toContain("Открыть у источника");
+    // избранное/поделиться в баре остаются
+    expect(bar.querySelector('[aria-label="В избранное"]')).toBeTruthy();
+    expect(bar.querySelector('[aria-label="Поделиться"]')).toBeTruthy();
+    // клик по primary открывает ту же инлайн-форму заявки, что и карточка
+    fireEvent.click(primary);
+    expect(await screen.findByLabelText("Комментарий менеджеру (необязательно)")).toBeTruthy();
+  });
+
+  it("после отправленной заявки primary бара — статус «Отправлено ✓» (disabled)", async () => {
+    renderScreen();
+    await screen.findByText("Hyundai Sonata");
+    const bar = document.querySelector(".listing-cta-bar") as HTMLElement;
+    const primary = bar.querySelector(".listing-cta-bar__btn") as HTMLButtonElement;
+    fireEvent.click(primary);
+    fireEvent.click(await screen.findByRole("button", { name: "Отправить заявку" }));
+    await screen.findByText("✅ Менеджер свяжется с вами");
+    expect(primary.textContent).toContain("Отправлено ✓");
+    expect(primary.disabled).toBe(true);
+  });
+});
+
+describe("PDP → калькулятор (UX-003, UIUX-GEO §4/§7)", () => {
+  /** Рендер с роутом /calc: линк «Доставка и растаможка» прокидывает страну. */
+  const renderWithCalc = async (over: Record<string, unknown> = {}) => {
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/favorites/")) return { favorited: false };
+      if (path.endsWith("/inspection")) throw Object.assign(new Error("nf"), { status: 404 });
+      if (path.endsWith("/analysis")) return null;
+      if (path === "/subscription") return { agent: false };
+      if (path.endsWith("/contact")) return { lead_id: 1, status: "created" };
+      return listing(over);
+    });
+    render(
+      <AppRoot>
+        <ToastProvider>
+          <MemoryRouter initialEntries={["/listing/7"]}>
+            <Routes>
+              <Route path="/listing/:id" element={<ListingScreen />} />
+              <Route
+                path="/calc"
+                element={<CalcProbe />}
+              />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
+      </AppRoot>,
+    );
+    // текст кнопки — со стрелкой «… →»; ищем по роли
+    await screen.findByRole("button", { name: /Доставка и растаможка/ });
+  };
+
+  it("линк «Доставка и растаможка» несёт ?country= страны лота", async () => {
+    await renderWithCalc({ country: "AE" });
+    fireEvent.click(screen.getByRole("button", { name: /Доставка и растаможка/ }));
+    await waitFor(() => expect(screen.getByTestId("calc-route")).toBeTruthy());
+    const search = screen.getByTestId("calc-route").textContent ?? "";
+    expect(search).toContain("country=AE");
+    expect(search).toContain("price=");
+  });
+
+  it("лот без страны: country= пустая — калькулятор останется на дефолте", async () => {
+    await renderWithCalc({ country: undefined });
+    fireEvent.click(screen.getByRole("button", { name: /Доставка и растаможка/ }));
+    await waitFor(() => expect(screen.getByTestId("calc-route")).toBeTruthy());
+    expect(screen.getByTestId("calc-route").textContent).toContain("country=");
   });
 });
 

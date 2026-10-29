@@ -61,6 +61,7 @@ import {
 import { listingStatusToast, useListingStatus } from "../lib/chatStore";
 import { useToast } from "../ui/Toast";
 import { useLoginPrompt } from "../ui/LoginPrompt";
+import { apiErrorText } from "./apiErrorText";
 import type { CreatedLot, LotSubmitResult, MyLot, PlacementInvoice } from "../api/types";
 import "../market.css";
 
@@ -82,17 +83,41 @@ const DRAFT_KEY = "autobot.sellDraft";
 /** Подписи шагов (прогресс-точки + заголовок тела шага). */
 const STEPS = ["Авто", "Фото", "Цена и публикация"] as const;
 
-const CURRENCIES: { value: "KRW" | "USD" | "RUB"; label: string }[] = [
-  { value: "KRW", label: "₩ KRW" },
-  { value: "USD", label: "$ USD" },
+/** Валюты рынка владельцев (UX-002/GEO): список синхронен со страной
+ *  продавца — KRW у источников (KR), в визарде не предлагается. */
+type SellCurrency = "RUB" | "USD" | "EUR" | "KZT" | "BYN";
+
+const CURRENCIES: { value: SellCurrency; label: string }[] = [
   { value: "RUB", label: "₽ RUB" },
+  { value: "USD", label: "$ USD" },
+  { value: "EUR", label: "€ EUR" },
+  { value: "KZT", label: "₸ KZT" },
+  { value: "BYN", label: "Br BYN" },
 ];
 
-const CURRENCY_SYMBOL: Record<"KRW" | "USD" | "RUB", string> = {
-  KRW: "₩",
-  USD: "$",
+const CURRENCY_SYMBOL: Record<SellCurrency, string> = {
   RUB: "₽",
+  USD: "$",
+  EUR: "€",
+  KZT: "₸",
+  BYN: "Br",
 };
+
+/** Дефолт валюты по стране продавца (UX-002): RU→RUB, KZ→KZT, BY→BYN,
+ *  GE/AM и остальные → USD; юзер может сменить вручную в селекте. */
+const COUNTRY_CURRENCY: Record<string, SellCurrency> = {
+  RU: "RUB",
+  KZ: "KZT",
+  BY: "BYN",
+  GE: "USD",
+  AM: "USD",
+};
+
+const currencyForCountry = (country: string): SellCurrency =>
+  COUNTRY_CURRENCY[country.toUpperCase()] ?? "USD";
+
+const isSellCurrency = (c: string): c is SellCurrency =>
+  CURRENCIES.some((x) => x.value === c);
 
 /** Значения совпадают со словарём lib/specs (карточки ленты подписываются). */
 const FUEL_OPTIONS: { value: string; label: string }[] = [
@@ -177,7 +202,7 @@ interface DraftData {
   country: string;
   city: string;
   price: string;
-  currency: "KRW" | "USD" | "RUB";
+  currency: SellCurrency;
   description: string;
   /** URL загруженных фото (незагруженные/ошибки не сохраняются). */
   photos: string[];
@@ -247,8 +272,12 @@ export function SellCarScreen() {
   const [model, setModel] = useState(initialDraft?.model ?? "");
   const [year, setYear] = useState(initialDraft?.year ?? "");
   const [price, setPrice] = useState(initialDraft?.price ?? "");
-  const [currency, setCurrency] = useState<"KRW" | "USD" | "RUB">(
-    initialDraft?.currency ?? "KRW",
+  // UX-002: валюта по умолчанию следует за страной (новый лот — RU/RUB);
+  // черновик без валидной валюты (старые KRW-записи) — дефолт страны
+  const [currency, setCurrency] = useState<SellCurrency>(
+    initialDraft && isSellCurrency(initialDraft.currency)
+      ? initialDraft.currency
+      : currencyForCountry(initialDraft?.country ?? "RU"),
   );
   const [mileage, setMileage] = useState(initialDraft?.mileage ?? "");
   const [fuel, setFuel] = useState(initialDraft?.fuel ?? "");
@@ -347,8 +376,12 @@ export function SellCarScreen() {
         setCountry(lot.country ?? "RU");
         setCity(lot.city ?? "");
         setPrice(lot.price != null ? String(lot.price) : "");
+        // валюта лота, если она из списка визарда; легаси-KRW и прочие —
+        // дефолт по стране лота (UX-002: KZ → ₸, RU → ₽)
         setCurrency(
-          lot.currency === "USD" || lot.currency === "RUB" ? lot.currency : "KRW",
+          lot.currency && isSellCurrency(lot.currency)
+            ? lot.currency
+            : currencyForCountry(lot.country ?? "RU"),
         );
         setDescription(lot.owner_description ?? "");
         setPhotos(
@@ -575,7 +608,7 @@ export function SellCarScreen() {
         "Размещение объявлений доступно после входа — войдите или зарегистрируйтесь.",
       );
     } else {
-      setSubmitError(`Не удалось разместить объявление: ${(e as Error).message}`);
+      setSubmitError(apiErrorText(e));
     }
   };
 
@@ -597,19 +630,19 @@ export function SellCarScreen() {
       if (!publish) {
         // БД-черновик — отдельная сущность в «Моих объявлениях» (10 §5)
         toast.show("Черновик сохранён");
-        navigate("/profile");
+        navigate("/auto?tab=mine");
         return;
       }
       const st = lot.status ?? "accepted"; // старый бэк без status — публикация
       if (st === "moderation") {
         toast.show("Отправлено на проверку — результат придёт здесь");
-        navigate("/profile");
+        navigate("/auto?tab=mine");
       } else if (st === "rejected") {
         toast.show(
           `Объявление отклонено: ${lot.rejected_reason ?? "нарушение правил размещения"}`,
           { error: true },
         );
-        navigate("/profile");
+        navigate("/auto?tab=mine");
       } else if (lot.placement_status === "needs_payment") {
         // Бесплатный слот занят: лот одобрен, опубликуется после оплаты
         setNeedsPayment(lot);
@@ -646,7 +679,7 @@ export function SellCarScreen() {
             ? "Правки отправлены на проверку"
             : "Черновик сохранён",
         );
-        navigate("/profile");
+        navigate("/auto?tab=mine");
         return;
       }
       const r = await api<LotSubmitResult>(`/market/lots/${editId}/submit`, {
@@ -663,7 +696,7 @@ export function SellCarScreen() {
         // accepted: размещение (в т.ч. needs_payment) — в «Моих объявлениях»
         toast.show("Объявление одобрено");
       }
-      navigate("/profile");
+      navigate("/auto?tab=mine");
     } catch (e) {
       const status = (e as { status?: number }).status;
       if (status === 409) {
@@ -672,7 +705,7 @@ export function SellCarScreen() {
           "Лот сейчас на проверке или снят — правки станут доступны после решения модерации.",
         );
       } else {
-        setSubmitError(`Не удалось сохранить изменения: ${(e as Error).message}`);
+        setSubmitError(apiErrorText(e));
       }
     } finally {
       setBusy(false);
@@ -695,7 +728,7 @@ export function SellCarScreen() {
   const dismissNeedsPayment = useCallback(() => {
     setNeedsPayment(null);
     toast.show("Лот сохранён — продлить можно в «Мои объявления»");
-    navigate("/profile");
+    navigate("/auto?tab=mine");
   }, [toast, navigate]);
 
   // Esc закрывает диалог оплаты (03 §5.3 — как шит ленты и лайтбокс)
@@ -726,7 +759,7 @@ export function SellCarScreen() {
           // коротко поллим карточку, пока is_active не станет true
           void waitForPublished(needsPayment.listing_id).then((ok) => {
             setExtending(false);
-            navigate(ok ? `/listing/${needsPayment.listing_id}` : "/profile");
+            navigate(ok ? `/listing/${needsPayment.listing_id}` : "/auto?tab=mine");
           });
         } else {
           setExtending(false);
@@ -737,7 +770,7 @@ export function SellCarScreen() {
           } else {
             toast.show("⏳ Платёж в обработке — объявление появится после подтверждения");
           }
-          navigate("/profile");
+          navigate("/auto?tab=mine");
         }
       });
       if (!inTg) {
@@ -746,7 +779,7 @@ export function SellCarScreen() {
       }
     } catch (e) {
       setExtending(false);
-      toast.show(`Не удалось создать счёт: ${(e as Error).message}`, { error: true });
+      toast.show(apiErrorText(e), { error: true });
     }
   };
 
@@ -761,7 +794,7 @@ export function SellCarScreen() {
           <div className="state__text">
             Лот не найден в «Моих объявлениях» — возможно, он уже снят с продажи.
           </div>
-          <button type="button" className="btn btn--primary" onClick={() => navigate("/profile")}>
+          <button type="button" className="btn btn--primary" onClick={() => navigate("/auto?tab=mine")}>
             К моим объявлениям
           </button>
         </div>
@@ -921,12 +954,18 @@ export function SellCarScreen() {
               </select>
             </label>
             {/* Гео owner-лота (GEO-V1 §3): страна продавца (дефолт RU —
-                внутренний рынок) + город (опционально, но рекомендуемо) */}
+                внутренний рынок) + город (опционально, но рекомендуемо).
+                Смена страны подтягивает её валюту (UX-002) — юзер может
+                после выбрать любую вручную в селекте на шаге 3. */}
             <label className="sell-field">
               <span>Страна *</span>
               <select
                 value={country}
-                onChange={(e) => setCountry(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setCountry(v);
+                  setCurrency(currencyForCountry(v));
+                }}
                 aria-label="Страна"
               >
                 {SELL_COUNTRIES.map((c) => (
@@ -1067,7 +1106,7 @@ export function SellCarScreen() {
                 <span>Валюта *</span>
                 <select
                   value={currency}
-                  onChange={(e) => setCurrency(e.target.value as "KRW" | "USD" | "RUB")}
+                  onChange={(e) => setCurrency(e.target.value as SellCurrency)}
                   aria-label="Валюта"
                 >
                   {CURRENCIES.map((c) => (

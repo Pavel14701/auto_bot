@@ -30,7 +30,14 @@ FORBIDDEN_HOSTNAMES: frozenset[str] = frozenset(
     {"localhost", "metadata.google.internal"}
 )
 # Поля config, которые обязаны указывать на внешний http(s)-хост.
-SOURCE_URL_KEYS: tuple[str, ...] = ("base_url", "detail_url_template", "list_url")
+# GEO-адаптеры склеивают base_url + list_path: без валидации list_path
+# конструкция "user@host" в пути уводила запрос на чужой хост (SEC-02).
+SOURCE_URL_KEYS: tuple[str, ...] = (
+    "base_url",
+    "detail_url_template",
+    "list_url",
+    "list_path",
+)
 SOURCE_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 DEFAULT_RETRY_POLICY: dict[str, Any] = {"max": 3, "backoff": "exponential"}
 

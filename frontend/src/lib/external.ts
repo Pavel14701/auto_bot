@@ -6,6 +6,9 @@
 import { getWebApp } from "../api/auth";
 
 export function openExternal(url: string): void {
+  // EXT-01 (аудит 2026-10-29): URL приходит из данных бэка — пропускаем
+  // только http(s), иначе javascript:/data: могли бы уйти в WebView.
+  if (!/^https?:\/\//i.test(url)) return;
   const wa = getWebApp();
   if (wa?.openLink) {
     wa.openLink(url, { try_instant_view: false });

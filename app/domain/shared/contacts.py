@@ -31,6 +31,17 @@ MESSENGER_MASK = "🔗 [внешний мессенджер скрыт — пр�
 # (VIN/коды без префикса не подходят).
 PHONE_RE = re.compile(r"(?<!\d)(?:\+|8)(?:[\s\-()]*\d){8,14}(?!\d)")
 
+# «Голый» номер без +/8 (PRIV-01 аудита 2026-10-29): >=10 цифр подряд
+# (или через пробелы/дефисы внутри), не приклеен к буквам/VIN — иначе
+# маскировались бы коды и хвосты идентификаторов. 10+ цифр подряд
+# в VIN/цвете не встречаются (VIN <= 5 подряд).
+BARE_PHONE_RE = re.compile(r"(?<![\w\d])(?:\d[\s\-]?){9,13}\d(?![\w\d])")
+
+# Email (PRIV-01): обмен почтой мимо сделки маскируем так же.
+EMAIL_RE = re.compile(
+    r"(?<![\w.])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w])"
+)
+
 # WhatsApp-ссылки: any wa.me / api.whatsapp.com / web.whatsapp.com.
 # Lookbehind не даёт зацепить t.me внутри чужих доменов («xwa.me»).
 WHATSAPP_RE = re.compile(
@@ -59,7 +70,8 @@ def mask_contacts(body: str, bot_username: str) -> str:
     Returns:
         Текст с плейсхолдерами вместо контактов.
     """
-    body = PHONE_RE.sub(PHONE_MASK, body)
+    # Сначала специфичные (wa.me/t.me несут номер в path): иначе
+    # BARE_PHONE_RE съедает цифры ссылки раньше маски мессенджера.
     body = WHATSAPP_RE.sub(MESSENGER_MASK, body)
 
     own = (bot_username or "").strip().lstrip("@").lower()
@@ -72,7 +84,12 @@ def mask_contacts(body: str, bot_username: str) -> str:
             return match.group(0)
         return MESSENGER_MASK
 
-    return TME_RE.sub(_tme_replace, body)
+    body = TME_RE.sub(_tme_replace, body)
+
+    body = PHONE_RE.sub(PHONE_MASK, body)
+    body = BARE_PHONE_RE.sub(PHONE_MASK, body)
+    body = EMAIL_RE.sub(PHONE_MASK, body)
+    return body
 
 
 def find_contacts(body: str, bot_username: str = "") -> list[str]:

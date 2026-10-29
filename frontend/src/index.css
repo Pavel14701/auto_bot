@@ -533,6 +533,7 @@ main {
 .listing-cta-bar {
   /* sticky, а не fixed: бар в потоке страницы — физически не может
      перекрыть таббар/контент; липнет к низу вьюпорта над таббаром */
+  flex-wrap: wrap; /* «Открыть у источника» — второй строкой (UX-004) */
   position: sticky;
   bottom: calc(var(--tabbar-h, 56px) + env(safe-area-inset-bottom, 0px));
   z-index: var(--z-cta);
@@ -596,6 +597,25 @@ main {
   color: var(--accent-text);
   font-size: var(--font-sm);
   font-weight: 700;
+  cursor: pointer;
+}
+.listing-cta-bar__btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+/* «Открыть у источника» — secondary-текстовая ссылка второй строкой бара
+   (UX-004: primary у бара один — действие экрана «Связаться») */
+.listing-cta-bar__src {
+  flex: 1 1 100%;
+  margin-top: var(--space-2);
+  padding: 2px 0 0;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  text-align: center;
+  text-decoration: underline;
   cursor: pointer;
 }
 
@@ -1548,7 +1568,10 @@ main {
   color: #e5484d;
   font-size: 13px;
   padding: 0;
-}
+
+  /* UX-015: тач-цель удаления варианта ≥44px (Фиттс) */
+  min-height: var(--touch-min, 44px);
+  padding: 6px 12px;}
 .compare-item {
   margin-bottom: 14px;
   padding: 12px;
@@ -3651,7 +3674,7 @@ body.feed-locked .app-content > div:not(.keepalive-hidden) {
   overflow-wrap: anywhere;
 }
 .pdp-orig__note {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 /* «?»-иконка Tooltip (P3): пояснение неочевидного вместо hint-строк */
 .pdp-qmark {
@@ -4022,7 +4045,7 @@ body.feed-locked .app-content > div:not(.keepalive-hidden) {
   font-weight: 600;
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 .feed-sheet__body > .feed-panel__section:first-child {
   margin-top: 0;

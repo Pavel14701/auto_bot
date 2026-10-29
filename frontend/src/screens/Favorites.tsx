@@ -24,10 +24,20 @@ import { apiErrorView } from "./apiErrorText";
 export function FavoritesScreen() {
   const [items, setItems] = useState<Listing[] | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [guest] = useState(() => isGuest());
+  const [guest, setGuest] = useState(() => isGuest());
   const loginPrompt = useLoginPrompt();
   const toast = useToast();
   const navigate = useNavigate();
+
+  // BF-04: экран живёт в keep-alive и не перемонтируется — после апгрейда
+  // гостя (автологин /login диспатчит autobot:auth) перечитываем гостя,
+  // иначе сегмент навсегда остаётся гейтом «Нужен вход». При guest=false
+  // эффект ниже сам догрузит список.
+  useEffect(() => {
+    const onAuth = () => setGuest(isGuest());
+    window.addEventListener("autobot:auth", onAuth);
+    return () => window.removeEventListener("autobot:auth", onAuth);
+  }, []);
 
   // Гость: раздел персональный — сразу просим войти (модалка + гейт экрана)
   useEffect(() => {

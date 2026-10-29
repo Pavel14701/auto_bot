@@ -43,9 +43,10 @@ export function AutoScreen() {
   }, [segment]);
 
   const open = (key: Segment) => {
-    // Сегмент в query: back/forward и deep-link'ы работают, «Мои
-    // объявления» остаётся последним при возврате на таб.
-    setSearchParams(key === "favorites" ? {} : { tab: key }, { replace: true });
+    // Сегмент в query: deep-link'и работают, переходы между сегментами
+    // живут в истории — «Назад» возвращает предыдущий сегмент (BF-11:
+    // replace вычищал историю, вопреки обещанию «back/forward работают»).
+    setSearchParams(key === "favorites" ? {} : { tab: key });
   };
 
   return (

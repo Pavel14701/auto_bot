@@ -6,6 +6,10 @@ POST /api/v1/ask  {question, context?}  (Bearer/X-API-Token — общий се�
 → ждёт ответ QueryConsumer (таймаут ASK_TIMEOUT_SEC)
 → маппит в контракт auto_bot: {answer, sources[], confidence, latency_ms}.
 
+Аутентификация fail-closed (INFRA-03, аудит 2026-10-29): пустой
+API_TOKEN = отказ всем (раньше пустой токен открывал ask/ingest
+анонимно), сравнение timing-safe через hmac.compare_digest.
+
 GET /health — liveness (+ статус соединения с брокером).
 
 Конфиг (env): API_TOKEN, RABBITMQ_URL, JWT_SECRET, JWT_ALGORITHM,
@@ -13,6 +17,7 @@ SERVICE_USER_ID, SERVICE_GROUPS, ASK_TIMEOUT_SEC, PORT.
 """
 
 import asyncio
+import hmac
 import os
 import time
 import uuid
@@ -146,7 +151,13 @@ async def ask(
     if authorization and authorization.startswith('Bearer '):
         token = authorization[7:]
     token = x_api_token or token
-    if not API_TOKEN or token != API_TOKEN:
+    # INFRA-03: fail-closed — пустой API_TOKEN = токен не настроен → отказ
+    # всем (раньше «не задан» означало «открыт»); сравнение timing-safe.
+    if not API_TOKEN:
+        raise HTTPException(status_code=401, detail='API token not configured')
+    if not token or not hmac.compare_digest(
+        token.encode(), API_TOKEN.encode()
+    ):
         raise HTTPException(status_code=401, detail='Invalid API token')
 
     await _ensure_rabbit()

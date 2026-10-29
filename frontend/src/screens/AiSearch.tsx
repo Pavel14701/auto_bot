@@ -277,6 +277,9 @@ export function AiSearchScreen() {
               className="btn btn--primary"
               onClick={() => {
                 const qs = lastCriteria ? criteriaToQuery(lastCriteria) : "";
+                // BF-05: обещаем ленту — переключаем сегмент Главной до
+                // навигации (меняется только query, pathname уже «/»).
+                window.dispatchEvent(new CustomEvent("autobot:open-feed"));
                 navigate(qs ? `/?${qs}` : "/");
               }}
             >
@@ -333,7 +336,7 @@ export function AiSearchScreen() {
               disabled={busy || !input.trim()}
               onClick={() => void send(input)}
             >
-              {busy ? "Думаю…" : "Отправить"}
+              {busy ? "Спрашиваю…" : "Отправить"}
             </button>
           </div>
         </div>

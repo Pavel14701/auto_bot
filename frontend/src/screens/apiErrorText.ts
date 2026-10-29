@@ -47,6 +47,10 @@ export function apiErrorView(e: unknown): ApiErrorView {
   const has = (...keys: string[]) => keys.some((k) => detail.includes(k));
 
   if (status === 401) {
+    // Вход по email (Login): неверная пара — не «сессия истекла»
+    if (has("invalid credentials")) {
+      return { text: "Неверный email или пароль. Проверьте данные и попробуйте ещё раз." };
+    }
     return {
       text: "Сессия истекла. Закройте мини-апп и откройте заново из Telegram-бота.",
     };
@@ -82,6 +86,13 @@ export function apiErrorView(e: unknown): ApiErrorView {
         text: "AI-анализ доступен после входа. Войдите через Telegram — разборы и уведомления привяжутся к аккаунту.",
       };
     }
+    // Чаты (09 §1/08 §2): гостевой гейт и архивная переговорная
+    if (has("chats_registration_required")) {
+      return { text: "Чаты доступны после входа или регистрации." };
+    }
+    if (has("thread_archived")) {
+      return { text: "Комната архивирована — отправка сообщений недоступна." };
+    }
     return {
       text: "Сессия истекла. Закройте мини-апп и откройте заново из Telegram-бота.",
     };
@@ -93,9 +104,39 @@ export function apiErrorView(e: unknown): ApiErrorView {
         text: "Уведомление не найдено — возможно, вы удалили его с другого устройства.",
       };
     }
+    // Переговорные (07 §2): код приглашения истёк/не существует
+    if (has("invite_not_found", "invite")) {
+      return { text: "Код приглашения истёк или не существует — попросите новый." };
+    }
     return {
       text: "Объявление не найдено. Возможно, его уже продали — оно исчезло с источника.",
     };
+  }
+
+  if (status === 409) {
+    // Переговорные (08 §1–§2) и рынок владельцев (10 §4): доменные конфликты
+    if (has("group_is_full")) {
+      return { text: "Переговорная заполнена (макс. 5 участников)." };
+    }
+    if (has("group_needs_listing")) {
+      return { text: "Переговорная создаётся только по автомобилю — выберите лот." };
+    }
+    if (has("listing_not_active")) {
+      return { text: "Этот лот уже неактивен — выберите другой." };
+    }
+    if (has("owner_must_archive")) {
+      return { text: "Сначала архивируйте комнату или исключите участников." };
+    }
+    if (has("lot_invalid_state")) {
+      return {
+        text: "Лот сейчас на проверке или снят — действие станет доступно после решения модерации.",
+      };
+    }
+    // Регистрация (Login): email занят
+    if (has("email already registered", "email_taken")) {
+      return { text: "Пользователь с таким email уже зарегистрирован — попробуйте войти." };
+    }
+    return { text: "Действие недоступно: состояние изменилось. Обновите страницу и попробуйте ещё раз." };
   }
 
   if (status === 422) {

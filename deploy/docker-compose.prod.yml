@@ -1,5 +1,5 @@
 # ============================================================
-# Боевой оверрайд поверх docker-compose.yml (профиль mono).
+# Боевой оверлей поверх docker-compose.yml (профиль mono).
 #
 #   DOMAIN=auto.example.com docker compose -f docker-compose.yml
 #     -f deploy/docker-compose.prod.yml --profile mono up -d
@@ -7,9 +7,17 @@
 # Что делает:
 #   • Caddy на 80/443 — автоматический Let's Encrypt (HTTPS для Mini App
 #     и web_app-кнопки Telegram; self-signed больше не нужен);
-#   • инфраструктура (postgres/redis/rabbitmq/minio/qdrant) больше НЕ
-#     торчит наружу — порты только на 127.0.0.1;
-#   • backend:8000 наружу не публикуется (только через Caddy → miniapp nginx);
+#   • наружу НЕ публикуется ВООБЩЕ ничего, кроме 80/443 Caddy: порты
+#     сброшены у хранилищ (postgres/redis/rabbitmq/minio/qdrant), у
+#     внутренних сервисов (translate/rag_api/микросервисы/centrifugo)
+#     и у backend/miniapp (INFRA-01, аудит 2026-10-29: опубликованные
+#     Docker-порты обходят ufw, а MinIO поднимался с minioadmin наружу);
+#   • секреты без дефолтов: MINIO_ROOT_USER/PASSWORD, TRANSLATE_API_TOKEN,
+#     RAG_API_TOKEN, RAG_JWT_SECRET обязательны (паттерн :? — compose
+#     откажется стартовать без них; значения задаются в .env/RUNBOOK);
+#   • RAG_JWT_SECRET — ОТДЕЛЬНЫЙ секрет, fallback на APP_SECRET_KEY из
+#     dev-compose здесь не работает (CHK-03: связывание секретов RAG и
+#     приложения = компрометация одного даёт оба);
 #   • restart: always + ротация логов (json-file, 10 MB × 3) на всё.
 # ============================================================
 services:
@@ -44,6 +52,56 @@ services:
     restart: always
     logging: *logging
 
+  # INFRA-01: MinIO — без наружных портов и с кредами из env (в dev-compose
+  # захардкожены minioadmin/minioadmin, здесь обязательны настоящие).
+  # S3_ACCESS_KEY/S3_SECRET_KEY бэкенда и MINIO_* у rag должны совпадать.
+  minio:
+    ports: !reset []
+    restart: always
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER обязателен в проде}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD обязателен в проде}
+    logging: *logging
+
+  # INFRA-01: Qdrant без авторизации — наружу не публикуем вообще.
+  # (API-ключ Qdrant — отдельная задача владельцу, см. RUNBOOK.)
+  qdrant:
+    ports: !reset []
+    restart: always
+    logging: *logging
+
+  # INFRA-02: translate больше не торчит наружу, токен обязателен
+  # (пустой API_TOKEN сервис теперь трактует как «отказ всем»).
+  translate:
+    ports: !reset []
+    restart: always
+    environment:
+      API_TOKEN: ${TRANSLATE_API_TOKEN:?TRANSLATE_API_TOKEN обязателен в проде}
+    logging: *logging
+
+  # INFRA-03/CHK-03: RAG — порт закрыт, токен и ОТДЕЛЬНЫЙ JWT-секрет
+  # обязательны (без fallback на APP_SECRET_KEY).
+  rag_api:
+    ports: !reset []
+    restart: always
+    environment:
+      API_TOKEN: ${RAG_API_TOKEN:?RAG_API_TOKEN обязателен в проде}
+      JWT_SECRET: ${RAG_JWT_SECRET:?RAG_JWT_SECRET обязателен в проде (отдельный от APP_SECRET_KEY)}
+    logging: *logging
+
+  rag_worker:
+    restart: always
+    environment:
+      JWT_SECRET: ${RAG_JWT_SECRET:?RAG_JWT_SECRET обязателен в проде (отдельный от APP_SECRET_KEY)}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER обязателен в проде}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD обязателен в проде}
+    logging: *logging
+
+  centrifugo:
+    ports: !reset []          # WS терминирует Caddy, 8008 наружу не нужен
+    restart: always
+    logging: *logging
+
   backend:
     ports: !reset []          # только через caddy → miniapp → /api
     restart: always
@@ -66,6 +124,44 @@ services:
     logging: *logging
 
   worker_fetch:
+    restart: always
+    logging: *logging
+
+  worker_send:
+    restart: always
+    logging: *logging
+
+  # Микросервисы (профиль micro): те же правила — внутренняя сеть только.
+  gateway:
+    ports: !reset []          # снаружи только caddy → miniapp → /api
+    restart: always
+    logging: *logging
+  identity:
+    ports: !reset []
+    restart: always
+    logging: *logging
+  catalog:
+    ports: !reset []
+    restart: always
+    logging: *logging
+  billing:
+    ports: !reset []
+    restart: always
+    logging: *logging
+  partners:
+    ports: !reset []
+    restart: always
+    logging: *logging
+  dialog:
+    ports: !reset []
+    restart: always
+    logging: *logging
+  admin:
+    ports: !reset []
+    restart: always
+    logging: *logging
+  chat:
+    ports: !reset []
     restart: always
     logging: *logging
 

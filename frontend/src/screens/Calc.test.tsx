@@ -117,7 +117,11 @@ describe("Calc: страна отправки (GEO-V1 §2–§3)", () => {
     fireEvent.click(screen.getByRole("button", { name: "ОАЭ" }));
     fireEvent.change(screen.getByPlaceholderText("18 000"), { target: { value: "18000" } });
     fireEvent.click(screen.getByRole("button", { name: "Рассчитать" }));
-    await screen.findByText(/Джебель-Али → Новороссийск/);
+    // маршрут есть и в заголовке-счётчике — подпись ищем в .calc-total__route
+    await waitFor(() => {
+      const note = document.querySelector(".calc-total__route");
+      expect(note?.textContent ?? "").toContain("Джебель-Али → Новороссийск");
+    });
     const route = document.querySelector(".calc-total__route");
     expect(route?.textContent).toContain("~25–40 дней");
   });
@@ -192,5 +196,67 @@ describe("Calc: юрисдикция расчёта по валюте (BYN → �
       expect(body.year).toBe(2021);
       expect(body.region).toBe("by");
     });
+  });
+});
+
+// ---------- BF-06: префилл deep-link не гонится с ручным вводом ----------
+
+describe("Calc: смена страны не откатывает ввод к ?price= (BF-06)", () => {
+  const deliveryCalls = () => apiMock.mock.calls.filter(([p]) => p === "/calc/delivery");
+  const lastBody = () =>
+    JSON.parse(String(deliveryCalls()[deliveryCalls().length - 1]![1]!.body));
+
+  const renderCalc = (initial: string) =>
+    render(
+      <MemoryRouter initialEntries={[initial]} initialIndex={0}>
+        <CalcScreen />
+      </MemoryRouter>,
+    );
+
+  it("до расчёта заголовок маршрута — прочерк (route придёт с ответом)", () => {
+    renderCalc("/calc");
+    expect(document.querySelector(".feed-header__counter")?.textContent).toBe(
+      "Корея → —",
+    );
+  });
+
+  it("ручная цена + тап страны: поле не сбрасывается к ?price=, расчёт один и от новой цены", async () => {
+    apiMock.mockResolvedValue({ ...byResult, region: "ru", currency: "₽", country: "CN" });
+    renderCalc("/calc?price=18000&year=2022");
+    await screen.findByText(/Итого «под ключ»/);
+    // юзер поменял цену руками
+    fireEvent.change(screen.getByPlaceholderText("18 000"), { target: { value: "25000" } });
+    const postsBefore = deliveryCalls().length;
+    fireEvent.click(screen.getByRole("button", { name: "Китай" }));
+    await waitFor(() => expect(lastBody().country).toBe("CN"));
+    // последний расчёт — от введённой цены, не от протухшего ?price=18000
+    expect(lastBody().price_usd).toBe(25000);
+    // поле ввода не откатилось к deep-link-значению
+    const input = screen.getByPlaceholderText("18 000") as HTMLInputElement;
+    expect(input.value.replace(/\s/g, "")).toBe("25000");
+    // смену страны считаем один раз: дубля от префилл-эффекта нет (BF-06)
+    expect(deliveryCalls().length).toBe(postsBefore + 1);
+  });
+
+  it("?country=AE из PDP предвыбирает ОАЭ и уходит в расчёт страной лота (UX-003)", async () => {
+    apiMock.mockResolvedValueOnce({
+      ...byResult,
+      region: "ru",
+      currency: "₽",
+      country: "AE",
+      route: "Джебель-Али → Новороссийск",
+      freight_days_min: 25,
+      freight_days_max: 40,
+    });
+    renderCalc("/calc?price=18000&year=2022&country=ae");
+    await screen.findByText(/Итого «под ключ»/);
+    expect(lastBody().country).toBe("AE");
+    // чипс ОАЭ активен, KR — нет
+    expect(screen.getByRole("button", { name: "ОАЭ" }).className).toContain("chip--active");
+    expect(screen.getByRole("button", { name: /Корея/ }).className).not.toContain("chip--active");
+    // заголовок маршрута строится от ответа бэка, без хардкода Владивостока
+    expect(document.querySelector(".feed-header__counter")?.textContent).toContain(
+      "Джебель-Али → Новороссийск",
+    );
   });
 });

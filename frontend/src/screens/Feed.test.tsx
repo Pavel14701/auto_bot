@@ -261,17 +261,17 @@ describe("Feed pagination", () => {
     expect(screen.queryByText("Не удалось загрузить следующие объявления")).toBeNull();
   });
 
-  it("чип цены шлёт price_max в вонах ($10 000 × 1350)", async () => {
+  it("чип цены шлёт price_max в долларах как есть (бэк сам нормализует usd_price, BF-01)", async () => {
     renderFeed();
     await waitFor(() => expect(screen.getByText("до $10 000")).toBeTruthy());
     fireEvent.click(screen.getByText("до $10 000"));
     await waitFor(() => {
       const listingCalls = apiMock.mock.calls.map((c) => String(c[0])).filter((p) => p.includes("/listings"));
-      expect(listingCalls.some((p) => p.includes("price_max=13500000"))).toBe(true);
+      expect(listingCalls.some((p) => p.includes("price_max=10000"))).toBe(true);
     });
   });
 
-  it("панель фильтров: цена и год конвертируются/пробрасываются, кнопка показывает счётчик", async () => {
+  it("панель фильтров: цена и год пробрасываются в $ без конвертации, кнопка показывает счётчик", async () => {
     renderFeed();
     await waitFor(() => expect(screen.getByRole("button", { name: /Фильтры/ })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Фильтры/ }));
@@ -280,7 +280,7 @@ describe("Feed pagination", () => {
     fireEvent.click(screen.getByText("Применить"));
     await waitFor(() => {
       const listingCalls = apiMock.mock.calls.map((c) => String(c[0])).filter((p) => p.includes("/listings"));
-      expect(listingCalls.some((p) => p.includes("price_max=6750000"))).toBe(true);
+      expect(listingCalls.some((p) => p.includes("price_max=5000"))).toBe(true);
       expect(listingCalls.some((p) => p.includes("year_from=2020"))).toBe(true);
     });
     // панель закрылась, на кнопке счётчик активных критериев
@@ -396,9 +396,9 @@ describe("Feed pagination", () => {
         .map((c) => String(c[0]))
         .filter((p) => p.includes("/listings"));
       const last = listingCalls[listingCalls.length - 1] ?? "";
-      // критерии из URL ушли в запрос ($25 000 × 1350 = 33 750 000 вон)
+      // критерии из URL ушли в запрос в $ как есть (контракт usd_price, BF-01)
       expect(last.includes("make=Kia")).toBe(true);
-      expect(last.includes("price_max=33750000")).toBe(true);
+      expect(last.includes("price_max=25000")).toBe(true);
     });
   });
 });
@@ -443,13 +443,13 @@ describe("Feed: чипс «🏪 Рынок» (source=market, витрина па
     // пресет «до $10 000» + рынок → в запросе и цена, и source
     fireEvent.click(screen.getByRole("button", { name: "до $10 000" }));
     await waitFor(() =>
-      expect(listingCalls().some((p) => p.includes("price_max=13500000"))).toBe(true),
+      expect(listingCalls().some((p) => p.includes("price_max=10000"))).toBe(true),
     );
     fireEvent.click(screen.getByRole("button", { name: "🏪 Рынок" }));
     await waitFor(() => {
       const last = listingCalls()[listingCalls().length - 1];
       expect(last.includes("source=market")).toBe(true);
-      expect(last.includes("price_max=13500000")).toBe(true);
+      expect(last.includes("price_max=10000")).toBe(true);
     });
   });
 });
@@ -491,13 +491,13 @@ describe("Feed: гео-фильтры стран (GEO-V1 §3)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "до $10 000" }));
     await waitFor(() =>
-      expect(listingCalls().some((p) => p.includes("price_max=13500000"))).toBe(true),
+      expect(listingCalls().some((p) => p.includes("price_max=10000"))).toBe(true),
     );
     fireEvent.click(screen.getByRole("button", { name: "Китай" }));
     await waitFor(() => {
       const last = listingCalls()[listingCalls().length - 1];
       expect(last.includes("country=CN")).toBe(true);
-      expect(last.includes("price_max=13500000")).toBe(true);
+      expect(last.includes("price_max=10000")).toBe(true);
     });
   });
 
@@ -581,5 +581,208 @@ describe("Feed: шит фильтров — Хик: секции и «Ещё п�
     fireEvent.click(screen.getByRole("button", { name: /Фильтры/ }));
     await waitFor(() => expect(screen.getByLabelText("Цвет")).toBeTruthy());
     expect((screen.getByLabelText("Цвет") as HTMLSelectElement).value).toBe("white");
+  });
+});
+
+describe("Feed: фиксы аудита 2026-10-29", () => {
+  /** Вызовы GET /listings (не фасеты и не limit=1-счётчик). */
+  const listingCalls = () =>
+    apiMock.mock.calls.map((c) => String(c[0])).filter((p) => p.includes("/listings?"));
+
+  it("BF-02: чужой query (?tab=) на смонтированной ленте не сбрасывает фильтры", async () => {
+    // Лента в keep-alive слушает location.search всего приложения: раньше
+    // /auto?tab=history (только чужие ключи) давал deepLinkQuery → {} →
+    // setQuery({}) — сброс фильтров + фоновая перезагрузка.
+    function Harness() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <button onClick={() => navigate("/auto?tab=mine")}>На авто</button>
+          <FeedScreen />
+        </>
+      );
+    }
+    render(
+      <AppRoot>
+        <MemoryRouter>
+          <Harness />
+        </MemoryRouter>
+      </AppRoot>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /Kia/ }).length).toBe(20),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "до $10 000" }));
+    await waitFor(() =>
+      expect(listingCalls().some((p) => p.includes("price_max=10000"))).toBe(true),
+    );
+    const before = listingCalls().length;
+
+    fireEvent.click(screen.getByText("На авто"));
+    // вернулись на таб с чужим query: фильтр жив, чипс активен
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "до $10 000" }).className).toContain(
+        "chip--active",
+      ),
+    );
+    // перезагрузки «Все» не было — новых запросов ленты нет
+    expect(listingCalls().length).toBe(before);
+  });
+
+  it("BF-02: монтирование ленты на /auto?tab=mine не трогает query и не чистит URL", async () => {
+    render(
+      <AppRoot>
+        <MemoryRouter initialEntries={["/auto?tab=mine"]}>
+          <FeedScreen inactive />
+        </MemoryRouter>
+      </AppRoot>,
+    );
+    // лента грузится с пустыми критериями (глубоких feed-ключей в URL нет)
+    await waitFor(() =>
+      expect(listingCalls().some((p) => p.includes("offset=0"))).toBe(true),
+    );
+    expect(listingCalls().some((p) => p.includes("price_"))).toBe(false);
+    expect(listingCalls().some((p) => p.includes("country="))).toBe(false);
+  });
+
+  it("BF-07: смена фильтра во время догрузки не приклеивает старые карточки", async () => {
+    // Управляемые промисы: первая страница — сразу; догрузка (offset>0)
+    // «висит», параллельно меняется query (reset) — поздний ответ старой
+    // догрузки должен быть проигнорирован (seq-счётчик запросов).
+    let resolveMore!: (v: unknown) => void;
+    let resolveReset!: (v: unknown) => void;
+    apiMock.mockImplementation((path: string) => {
+      if (path.startsWith("/filters")) return Promise.resolve([]);
+      if (path.includes("/listings/facets")) return Promise.resolve({ makes: [] });
+      const sp = new URLSearchParams(path.split("?")[1]);
+      const offset = Number(sp.get("offset") ?? 0);
+      const country = sp.get("country");
+      if (country != null && offset === 0)
+        return new Promise((r) => {
+          resolveReset = r;
+        });
+      if (offset > 0)
+        return new Promise((r) => {
+          resolveMore = r;
+        });
+      return Promise.resolve(page(0, TOTAL, 20));
+    });
+    renderFeed();
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /Kia/ }).length).toBe(20),
+    );
+    scrollFeed(); // догрузка страницы 2 — в полёте
+    await waitFor(() => expect(resolveMore).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Корея" })); // reset — в полёте
+    await waitFor(() => expect(resolveReset).toBeTruthy());
+
+    // старый ответ (догрузка «без страны») пришёл ПЕРВЫМ — игнорируется
+    resolveMore(page(20, TOTAL, 20));
+    // новый ответ: 2 карточки страны KR
+    resolveReset({ total: 2, items: [listing(101), listing(102)] });
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /Kia/ }).length).toBe(2),
+    );
+    // чужих карточек из старой догрузки не приклеилось (иначе 22)
+    expect(screen.getByText("Показаны все найденные варианты")).toBeTruthy();
+  });
+
+  it("BF-10: повторный одинаковый deep-link применяется снова (router-state синхронен)", async () => {
+    function Harness() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <button onClick={() => navigate("/?country=AE")}>Показать в ленте</button>
+          <FeedScreen />
+        </>
+      );
+    }
+    render(
+      <AppRoot>
+        <MemoryRouter>
+          <Harness />
+        </MemoryRouter>
+      </AppRoot>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /Kia/ }).length).toBe(20),
+    );
+    // первый deep-link применён и «потреблён»
+    fireEvent.click(screen.getByRole("button", { name: "Показать в ленте" }));
+    await waitFor(() =>
+      expect(listingCalls()[listingCalls().length - 1].includes("country=AE")).toBe(true),
+    );
+    // пользователь снял страну чипсом (навигации нет)
+    fireEvent.click(screen.getByRole("button", { name: "ОАЭ" }));
+    await waitFor(() =>
+      expect(listingCalls()[listingCalls().length - 1].includes("country=")).toBe(false),
+    );
+    // повторный deep-link с ТЕМИ ЖЕ критериями должен сработать снова
+    fireEvent.click(screen.getByRole("button", { name: "Показать в ленте" }));
+    await waitFor(() =>
+      expect(listingCalls()[listingCalls().length - 1].includes("country=AE")).toBe(true),
+    );
+    expect(
+      screen.getByRole("button", { name: "ОАЭ" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("BF-15: после входа (autobot:auth) чипсы «Мои сигналы» перечитываются", async () => {
+    renderFeed();
+    await waitFor(() => expect(screen.getByText("до $10 000")).toBeTruthy());
+    expect(screen.queryByText(/Сигнал #/)).toBeNull(); // гостю /filters пуст
+    apiMock.mockImplementation(async (path: string) => {
+      if (path.startsWith("/filters")) {
+        return [
+          {
+            id: 5,
+            name: null,
+            criteria: { price_max: 30000 },
+            notify_mode: "instant",
+            quiet_hours: null,
+            created_at: "2026-10-01T00:00:00Z",
+            updated_at: null,
+          },
+        ];
+      }
+      return listOk(path);
+    });
+    window.dispatchEvent(new Event("autobot:auth"));
+    await waitFor(() => expect(screen.getByText(/Сигнал #5/)).toBeTruthy());
+    // клик по чипсу применяет подписку
+    fireEvent.click(screen.getByText(/Сигнал #5/));
+    await waitFor(() =>
+      expect(listingCalls().some((p) => p.includes("price_max=30000"))).toBe(true),
+    );
+  });
+
+  it("BF-05: событие autobot:open-feed переключает Главную на сегмент «Лента»", async () => {
+    // «Показать в ленте» из AI-поиска диспатчит событие (меняется только
+    // query) — Главная обязана показать ленту, а не оставаться в AI-чате.
+    // jsdom не умеет scrollIntoView (AiSearch: автоскролл чата к низу).
+    Element.prototype.scrollIntoView = () => undefined;
+    const { HomeScreen } = await import("./Home");
+    render(
+      <AppRoot>
+        <MemoryRouter>
+          <HomeScreen />
+        </MemoryRouter>
+      </AppRoot>,
+    );
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Лента" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "AI-поиск" }));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("feed-viewport").closest(".keepalive-hidden"),
+      ).not.toBeNull(),
+    );
+    window.dispatchEvent(new CustomEvent("autobot:open-feed"));
+    await waitFor(() =>
+      expect(screen.getByTestId("feed-viewport").closest(".keepalive-hidden")).toBeNull(),
+    );
+    expect(
+      screen.getByRole("tab", { name: "Лента" }).getAttribute("aria-selected"),
+    ).toBe("true");
   });
 });

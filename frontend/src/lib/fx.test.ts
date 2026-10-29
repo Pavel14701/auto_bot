@@ -1,7 +1,14 @@
 /** Юнит-тесты чистых хелперов миниаппа (vitest, node — без React). */
 import { describe, expect, it } from "vitest";
 
-import { EUR_PER_USD, KRW_PER_USD, digits, parseQueryVariants, toUsd } from "./fx";
+import {
+  EUR_PER_USD,
+  KRW_PER_USD,
+  digits,
+  formatOriginal,
+  parseQueryVariants,
+  toUsd,
+} from "./fx";
 
 describe("toUsd", () => {
   it("KRW делит на 1350 и округляет", () => {
@@ -35,6 +42,43 @@ describe("toUsd", () => {
     expect(toUsd(0)).toBeNull();
     expect(toUsd(-5)).toBeNull();
     expect(toUsd(undefined, "KRW")).toBeNull();
+  });
+
+  it("BF-14: положительная цена — минимум $1 (null только для нуля/пустых)", () => {
+    expect(toUsd(100, "KZT")).toBe(1); // 100/480 → 0.2 → не $0, а $1
+    expect(toUsd(479, "KZT")).toBe(1);
+    expect(toUsd(1, "KRW")).toBe(1);
+    expect(toUsd(0.4)).toBe(1); // USD-дробные тоже не схлопываются в $0
+    expect(toUsd(0, "KZT")).toBeNull();
+    expect(toUsd(480, "KZT")).toBe(1);
+    expect(toUsd(481, "KZT")).toBe(1); // 1.002 → 1
+    expect(toUsd(960, "KZT")).toBe(2);
+  });
+});
+
+describe("formatOriginal (символы валют, BF-14)", () => {
+  /** Число → строка с разделителями как в formatOriginal (ru-RU, NBSP). */
+  const n = (v: number) => v.toLocaleString("ru-RU");
+
+  it("ISO-коды источников → символы: ₩ ₸ ¥ (AED — кодом, дирхам ломает шрифты)", () => {
+    expect(formatOriginal(24_300_000, "KRW")).toBe(`${n(24_300_000)} ₩`);
+    expect(formatOriginal(12_200_000, "KZT")).toBe(`${n(12_200_000)} ₸`);
+    expect(formatOriginal(238_000, "CNY")).toBe(`${n(238_000)} ¥`);
+    expect(formatOriginal(125_000, "AED")).toBe(`${n(125_000)} AED`);
+    expect(formatOriginal(125_000, "aed")).toBe(`${n(125_000)} AED`); // регистр
+  });
+
+  it("локальные валюты: ₽ и Br", () => {
+    expect(formatOriginal(1_656_000, "RUB")).toBe(`${n(1_656_000)} ₽`);
+    expect(formatOriginal(54_900, "BYN")).toBe(`${n(54_900)} Br`);
+    expect(formatOriginal(18_000, "USD")).toBe(`${n(18_000)} $`);
+    expect(formatOriginal(10_000, "EUR")).toBe(`${n(10_000)} €`);
+  });
+
+  it("неизвестный код — как есть; без валюты — просто число", () => {
+    expect(formatOriginal(999, "GBP")).toBe(`${n(999)} GBP`);
+    expect(formatOriginal(999)).toBe(n(999));
+    expect(formatOriginal(999, null)).toBe(n(999));
   });
 });
 

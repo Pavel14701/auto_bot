@@ -164,6 +164,22 @@ describe("гостевой режим сайта", () => {
     expect(mocks.guestLogin).not.toHaveBeenCalled();
     expect(screen.queryByText(/Демо без регистрации/)).toBeNull();
   });
+
+  it("BF-09: вход из лендинга — браузерный «Назад» возвращает лендинг, а не выходит с сайта", async () => {
+    // Браузерный сценарий: лендинг на «/» (не Telegram), вход пушит вторую
+    // запись истории — Назад попадает на лендинг без перезагрузки.
+    mocks.isTelegramContext.mockReturnValue(false);
+    window.history.replaceState(null, "", "/");
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("landing")).toBeTruthy());
+    screen.getByText("Приложение для пользователей").click();
+    // приложение смонтировалось (гостевой вход + лента)
+    await waitFor(() => expect(screen.getByText(/Kia/)).toBeTruthy());
+    // Назад: с записи приложения на запись лендинга (state=null) — лендинг
+    window.history.back();
+    await waitFor(() => expect(screen.getByTestId("landing")).toBeTruthy());
+    expect(screen.queryByText(/Демо без регистрации/)).toBeNull();
+  });
 });
 
 describe("keep-alive таб-экранов", () => {

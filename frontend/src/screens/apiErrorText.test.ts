@@ -55,3 +55,49 @@ describe("apiErrorView: маппинг по префиксу detail и стат�
     expect(apiErrorText(err(500, "weird internal stuff"))).not.toContain("weird");
   });
 });
+
+describe("apiErrorView: чаты/платежи/логин (UX-005/006 — недостающие detail-коды)", () => {
+  it("401 Invalid credentials → «Неверный email или пароль» (Login)", () => {
+    expect(apiErrorText(err(401, "Invalid credentials"))).toContain("Неверный email или пароль");
+  });
+
+  it("409 Email already registered → «уже зарегистрирован — попробуйте войти»", () => {
+    expect(apiErrorText(err(409, "Email already registered"))).toContain(
+      "уже зарегистрирован",
+    );
+  });
+
+  it("403 chats_registration_required → чаты после входа", () => {
+    expect(apiErrorText(err(403, "chats_registration_required: чаты доступны после входа"))).toBe(
+      "Чаты доступны после входа или регистрации.",
+    );
+  });
+
+  it("403 thread_archived → комната архивирована", () => {
+    expect(apiErrorText(err(403, "thread_archived: тред архивирован, отправка недоступна"))).toBe(
+      "Комната архивирована — отправка сообщений недоступна.",
+    );
+  });
+
+  it("404 invite_not_found → код приглашения истёк", () => {
+    expect(apiErrorText(err(404, "invite_not_found: код истёк или не существует"))).toContain(
+      "Код приглашения истёк",
+    );
+  });
+
+  it("409-коды переговорных: group_is_full / owner_must_archive", () => {
+    expect(apiErrorText(err(409, "group_is_full: в переговорной уже 5 участников"))).toContain(
+      "Переговорная заполнена",
+    );
+    expect(
+      apiErrorText(err(409, "owner_must_archive: владелец уходит последним")),
+    ).toContain("Сначала архивируйте комнату");
+  });
+
+  it("строка-сообщение (room.error из стора) тоже маппится без сырого текста", () => {
+    const text = apiErrorText("network down");
+    expect(text).toContain("Что-то пошло не так");
+    expect(text).not.toContain("network down");
+    expect(apiErrorText("Failed to fetch")).toContain("Нет соединения");
+  });
+});

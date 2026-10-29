@@ -276,7 +276,9 @@ class ConfirmPayment:
             provider_payment_id=provider_payment_id,
             paid_at=datetime.now(UTC),
         ):
-            # Параллельный вебхук уже активировал подписку этим платежом.
+            # Параллельный вебхук уже активировал подписку этим платежом
+            # (B-02): эффект применён не нами — отбрасываем свою транзакцию
+            # (no-op UPDATE) и отвечаем тем же подтверждением, что и победитель.
             await self._payments.rollback()
             return PaymentConfirmation(
                 activated=True,

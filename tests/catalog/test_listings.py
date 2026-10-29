@@ -322,6 +322,126 @@ async def test_listings_price_filter_normalized_krw(
 
 
 @pytest.mark.asyncio
+async def test_listings_price_filter_converts_kzt(
+    client: AsyncClient, session: AsyncSession,
+):
+    """B-03: kolesa-лот 12.2M KZT (÷480 ≈ $25.4k) попадает в окно 20000–30000."""
+    kzt = await _make_listing(
+        session,
+        source="kolesa",
+        source_id="kzt-1",
+        price=Decimal("12200000"),
+        currency="KZT",
+    )
+    cheap = await _make_listing(
+        session,
+        source="kolesa",
+        source_id="kzt-2",
+        price=Decimal("2400000"),  # $5 000 — вне окна
+        currency="KZT",
+    )
+    r = await client.get(
+        "/api/listings",
+        params={"source": "kolesa", "price_min": 20000, "price_max": 30000},
+    )
+    ids = [item["id"] for item in r.json()["items"]]
+    assert kzt.id in ids
+    assert cheap.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_listings_price_filter_converts_aed_and_cny(
+    client: AsyncClient, session: AsyncSession,
+):
+    """B-03: AED (÷3.6725) и CNY (÷7.1) тоже конвертируются в USD."""
+    aed = await _make_listing(
+        session,
+        source="dubizzle",
+        source_id="aed-1",
+        price=Decimal("73450"),  # ≈ $20 000
+        currency="AED",
+    )
+    cny = await _make_listing(
+        session,
+        source="che168",
+        source_id="cny-1",
+        price=Decimal("213000"),  # = $30 000
+        currency="CNY",
+    )
+    r_aed = await client.get(
+        "/api/listings", params={"source": "dubizzle", "price_min": 19000},
+    )
+    assert aed.id in [item["id"] for item in r_aed.json()["items"]]
+    r_cny = await client.get(
+        "/api/listings",
+        params={"source": "che168", "price_min": 19000, "price_max": 25000},
+    )
+    cny_ids = [item["id"] for item in r_cny.json()["items"]]
+    assert cny.id not in cny_ids  # $30k выше верхней границы окна
+    r_cny_full = await client.get(
+        "/api/listings", params={"source": "che168", "price_min": 19000},
+    )
+    assert cny.id in [item["id"] for item in r_cny_full.json()["items"]]
+
+
+@pytest.mark.asyncio
+async def test_listings_sort_mixed_currencies(
+    client: AsyncClient, session: AsyncSession,
+):
+    """B-03: сортировка price_asc смешивает валюты по USD-эквиваленту."""
+    usd_20k = await _make_listing(
+        session, source="encar", source_id="mix-usd",
+        price=Decimal("20000"), currency="USD",
+    )
+    kzt = await _make_listing(
+        session, source="kcar", source_id="mix-kzt",
+        price=Decimal("9600000"), currency="KZT",  # = $20 000 ровно
+    )
+    krw = await _make_listing(
+        session, source="encar", source_id="mix-krw",
+        price=Decimal("40500000"), currency="KRW",  # = $30 000
+    )
+    cny = await _make_listing(
+        session, source="kcar", source_id="mix-cny",
+        price=Decimal("78000"), currency="CNY",  # ≈ $10 986
+    )
+    r = await client.get("/api/listings", params={"sort": "price_asc"})
+    ids = [item["id"] for item in r.json()["items"]]
+    assert ids.index(cny.id) < ids.index(usd_20k.id)
+    assert ids.index(kzt.id) < ids.index(krw.id)
+
+
+@pytest.mark.asyncio
+async def test_listings_unknown_currency_excluded_from_price_filter(
+    client: AsyncClient, session: AsyncSession,
+):
+    """B-03: невалюта → NULL → вне ценового окна и в конце сортировки."""
+    weird = await _make_listing(
+        session, source="encar", source_id="cur-x",
+        price=Decimal("25000"), currency="XYZ",
+    )
+    no_currency = await _make_listing(
+        session, source="encar", source_id="cur-null",
+        price=Decimal("25000"), currency=None,
+    )
+    priced = await _make_listing(
+        session, source="encar", source_id="cur-usd",
+        price=Decimal("25000"), currency="USD",
+    )
+    r = await client.get("/api/listings", params={"price_min": 20000})
+    ids = [item["id"] for item in r.json()["items"]]
+    assert priced.id in ids
+    assert weird.id not in ids
+    assert no_currency.id not in ids
+
+    r_sort = await client.get("/api/listings", params={"sort": "price_asc"})
+    ids_sort = [item["id"] for item in r_sort.json()["items"]]
+    # Невалюта — в конце (nulls_last), но из выдачи не пропадает.
+    assert ids_sort.index(priced.id) < ids_sort.index(weird.id)
+    assert ids_sort.index(priced.id) < ids_sort.index(no_currency.id)
+
+
+@pytest.mark.asyncio
 async def test_listings_currency_filter(client: AsyncClient, session: AsyncSession):
     krw = await _make_listing(
         session, source_id="krw-2", currency="KRW",

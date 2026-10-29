@@ -5,8 +5,11 @@
 создания гостей это осознанный компромисс: в худшем случае окно
 первого запроса чуть «растягивается», злоумышленнику это не помощь.
 
-Ключ берётся из `X-Forwarded-For` (первый IP — за reverse-proxy),
-fallback — `request.client.host`.
+IP клиента (AUTH-01, аудит 2026-10-29): `X-Real-IP`, иначе ПРАВЫЙ
+(последний) IP цепочки `X-Forwarded-For` — его дописал доверенный
+прокси (nginx миниаппа ставит `$proxy_add_x_forwarded_for`), а не
+клиент; левую часть цепочки клиент подделывает одним заголовком.
+Fallback — `request.client.host`.
 """
 
 from __future__ import annotations
@@ -53,20 +56,35 @@ async def guest_ip_allowed(
     return count <= limit
 
 
-def client_ip(forwarded_for: str | None, host: str | None) -> str:
-    """Извлекает IP клиента: первый из `X-Forwarded-For`, иначе host.
+def client_ip(
+    forwarded_for: str | None, host: str | None, real_ip: str | None = None
+) -> str:
+    """IP клиента для rate-limit: `X-Real-IP` → правый XFF → host.
+
+    AUTH-01: ПЕРВЫЙ элемент `X-Forwarded-For` полностью контролируется
+    клиентом (один заголовок — и лимит ключуется по новому «IP»), поэтому
+    берём ПОСЛЕДНИЙ непустой элемент цепочки: его дописал доверенный
+    прокси на пути к нам, и это адрес, который прокси видел как адрес
+    клиента. `X-Real-IP` (тоже ставит наш nginx) приоритетнее, потому
+    что не накапливает хвосты чужих прокси. Fallback — прямой адрес
+    соединения `request.client.host`.
 
     Args:
         forwarded_for: Заголовок `X-Forwarded-For` или `None`.
         host: `request.client.host` или `None`.
+        real_ip: Заголовок `X-Real-IP` или `None`.
 
     Returns:
         Нормализованный IP (или `"unknown"`).
     """
+    if real_ip and real_ip.strip():
+        return real_ip.strip()
     if forwarded_for:
-        first = forwarded_for.split(",")[0].strip()
-        if first:
-            return first
+        # Справа налево: спуф-префиксы клиента слева игнорируем.
+        for part in reversed(forwarded_for.split(",")):
+            candidate = part.strip()
+            if candidate:
+                return candidate
     return (host or "unknown").strip() or "unknown"
 
 

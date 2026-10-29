@@ -54,9 +54,25 @@ export function formatUsd(usd: number): string {
   return `$${usd.toLocaleString("ru-RU")}`;
 }
 
-/** Цена источника: «24 300 000 ₩». */
+/** Символы валют «цены у источника» (BF-14): Listing.currency с бэка —
+ *  ISO-код; показываем символ, неизвестные коды — как есть. AED — кодом:
+ *  знак дирхама (د.إ) ломает шрифты в части WebView. */
+const CURRENCY_SYMBOL: Record<string, string> = {
+  KRW: "₩",
+  KZT: "₸",
+  CNY: "¥",
+  AED: "AED",
+  RUB: "₽",
+  BYN: "Br",
+  USD: "$",
+  EUR: "€",
+};
+
+/** Цена источника: «24 300 000 ₩» / «12 200 000 ₸» (символ по ISO-коду). */
 export function formatOriginal(price: number, currency?: string | null): string {
-  return `${price.toLocaleString("ru-RU")} ${currency ?? ""}`.trim();
+  const code = (currency ?? "").trim().toUpperCase();
+  const tail = CURRENCY_SYMBOL[code] ?? (currency ?? "").trim();
+  return `${price.toLocaleString("ru-RU")} ${tail}`.trim();
 }
 
 /**
@@ -82,21 +98,23 @@ export function priceChain(
   return { usd: formatUsd(usd), local, original: orig };
 }
 
-/** Цена в $: KRW÷1350, KZT÷480, CNY÷7.1, AED÷3.6725, EUR ×1.08, RUB ÷92, BYN ÷3.05; null для пустых/нулевых. */
+/** Цена в $: KRW÷1350, KZT÷480, CNY÷7.1, AED÷3.6725, EUR ×1.08, RUB ÷92, BYN ÷3.05;
+ *  null только для пустых/нулевых — положительная цена округляется до
+ *  минимума $1 (BF-14: toUsd(100,"KZT") не должен показывать «$0»). */
 export function toUsd(
   price: number | null | undefined,
   currency?: string | null,
 ): number | null {
   if (price == null || price <= 0) return null;
   const cur = (currency ?? "USD").toUpperCase();
-  if (cur === "KRW") return Math.round(price / KRW_PER_USD);
-  if (cur === "EUR") return Math.round(price * EUR_PER_USD);
-  if (cur === "RUB") return Math.round(price / RUB_PER_USD);
-  if (cur === "BYN") return Math.round(price / BYN_PER_USD);
-  if (cur === "KZT") return Math.round(price / KZT_PER_USD);
-  if (cur === "CNY") return Math.round(price / CNY_PER_USD);
-  if (cur === "AED") return Math.round(price / AED_PER_USD);
-  return Math.round(price);
+  if (cur === "KRW") return Math.max(1, Math.round(price / KRW_PER_USD));
+  if (cur === "EUR") return Math.max(1, Math.round(price * EUR_PER_USD));
+  if (cur === "RUB") return Math.max(1, Math.round(price / RUB_PER_USD));
+  if (cur === "BYN") return Math.max(1, Math.round(price / BYN_PER_USD));
+  if (cur === "KZT") return Math.max(1, Math.round(price / KZT_PER_USD));
+  if (cur === "CNY") return Math.max(1, Math.round(price / CNY_PER_USD));
+  if (cur === "AED") return Math.max(1, Math.round(price / AED_PER_USD));
+  return Math.max(1, Math.round(price));
 }
 
 /**

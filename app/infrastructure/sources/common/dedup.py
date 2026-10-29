@@ -1,7 +1,12 @@
 """Дедупликация (ТЗ п. 6.10).
 
-- Внутри источника: уникальный индекс `(source, source_id)` в БД.
-- Между источниками: ключ по VIN или fuzzy-хэш, TTL 48 часов в Redis.
+- Внутри источника: уникальный индекс `(source, source_id)` в БД; повторный
+  фетч известной пары ДОЛЖЕН доходить до upsert (обновление цены/контента,
+  `last_seen_at`), поэтому src-ключи своего источника не считаются дублем.
+- Между источниками: кросс-ключи по VIN или fuzzy-хэш (без source),
+  TTL 48 часов в Redis — «первый источник выигрывает» для НОВЫХ лотов.
+  Повторный фетч лота, уже известного в своей паре `(source, source_id)`,
+  дедупом не отбрасывается (см. `_RedisDuplicates` в services/fetch.py).
 
 Ключи версионированы: при изменении состава/нормализации ключа нужно
 поднять `_DEDUP_VERSION` — старые ключи истекут за TTL, ручная миграция
@@ -19,22 +24,35 @@ from app.domain.listings.unified import UnifiedListing
 logger = logging.getLogger(__name__)
 
 DEDUP_TTL_SEC = 48 * 60 * 60  # 48 часов
+# Формат кросс-ключей не менялся с v3; src-ключи (`...:src:{source}:...`) —
+# новое пространство имён внутри той же версии: in-flight кросс-claim'ы
+# деплоя переживают, bump версии не нужен.
 _DEDUP_VERSION = "v3"  # bump при изменении состава/normalization ключей
 # TECHDEBT 3.2: пробег в fuzzy-ключе округляется до кратного 1000 км —
 # счётчик пробега гуляет между заходами парсера на единицы км.
 _MILEAGE_ROUND_KM = 1000
 
-# Атомарно: если ЛЮБОЙ из ключей существует — вернуть 0 и ничего не менять;
-# иначе выставить ВСЕ ключи с TTL и вернуть 1. Без этого частичный SET
-# «отравлял» бы ключи для отклонённых объявлений (потеря данных).
+# Атомарно (B-04): KEYS[1..ARGV[1]] — src-ключи СВОЕГО источника, остальные
+# KEYS — кросс-ключи. Если существует любой src-ключ → это повторный фетч
+# лота своим источником: вернуть 1 («не дубль»), состояние не менять —
+# апдейт должен дойти до upsert. Иначе если существует любой кросс-ключ →
+# лот уже забрал другой источник: вернуть 0 (межисточниковый дубль).
+# Иначе выставить ВСЕ ключи с TTL и вернуть 1. Без «всё или ничего»
+# частичный SET «отравлял» бы ключи отклонённых объявлений.
 _CLAIM_SCRIPT = """
+local nsrc = tonumber(ARGV[1])
+for i = 1, nsrc do
+    if redis.call("EXISTS", KEYS[i]) == 1 then
+        return 1
+    end
+end
 for i = 1, #KEYS do
     if redis.call("EXISTS", KEYS[i]) == 1 then
         return 0
     end
 end
 for i = 1, #KEYS do
-    redis.call("SET", KEYS[i], "1", "EX", ARGV[1])
+    redis.call("SET", KEYS[i], "1", "EX", ARGV[2])
 end
 return 1
 """
@@ -127,7 +145,7 @@ def _norm_mileage(value: Any) -> str:
 
 
 def vin_key(vin: str) -> str:
-    """Redis-ключ дедупа по VIN.
+    """Redis-КРОСС-ключ дедупа по VIN (межисточниковый, без source).
 
     Args:
         vin: VIN (непустой после `.strip()`).
@@ -147,7 +165,7 @@ def vin_key(vin: str) -> str:
 
 
 def fuzzy_key(listing: UnifiedListing) -> str:
-    """Хэш по make+model+year+mileage (без цены) — когда VIN отсутствует.
+    """Redis-КРОСС-ключ по make+model+year+mileage (без цены и source).
 
     TECHDEBT 3.2: `price` исключён — смена цены («снизил цену, чтобы
     продать») не должна рождать «новое» объявление: это тот же лот.
@@ -176,7 +194,7 @@ def fuzzy_key(listing: UnifiedListing) -> str:
 
 
 def _dedup_keys(listing: UnifiedListing) -> list[str]:
-    """Собирает непустые dedup-ключи для объявления.
+    """Собирает непустые КРОСС-ключи дедупа (межисточниковые).
 
     Пустые/пробельные VIN, make, model игнорируются: `sha256("")` иначе
     схлопнул бы все такие объявления в один «дубль».
@@ -198,29 +216,60 @@ def _dedup_keys(listing: UnifiedListing) -> list[str]:
     return keys
 
 
-async def claim(redis: Redis, listing: UnifiedListing) -> bool:
-    """Атомарно «забирает» объявление: `True` — новое, `False` — дубль.
+def _source_keys(listing: UnifiedListing, cross_keys: list[str]) -> list[str]:
+    """Src-ключи СВОЕГО источника — зеркально кросс-ключам с prefix source.
 
-    При `True` все ключи выставлены с TTL; при `False` состояние Redis
-    не менялось. Если после `claim` вставка в БД упала — вызывающий
-    **обязан** вызвать `release(redis, listing)`, иначе объявление
-    потеряется до истечения TTL.
+    Существование src-ключа = «этот источник уже недавно фетчил этот лот» —
+    повторный фетч (апдейт цены/контента), а не новый межисточниковый дубль.
+
+    Args:
+        listing: Унифицированное объявление (source нормализуется lower).
+        cross_keys: Кросс-ключи из `_dedup_keys` (хранят тип vin/fuzzy).
+
+    Returns:
+        Ключи вида `dedup:{ver}:src:{source}:{vin|fuzzy}:{sha256}`;
+        порядок соответствует `cross_keys`.
+    """
+    source = (listing.source or "").strip().lower()
+    # Кросс-ключ имеет вид `dedup:{ver}:{kind}:{digest}` — вставляем src.
+    return [key.replace(f":{_DEDUP_VERSION}:", f":{_DEDUP_VERSION}:src:{source}:", 1)
+            for key in cross_keys]
+
+
+async def claim(redis: Redis, listing: UnifiedListing) -> bool:
+    """Атомарно «забирает» объявление: `True` — новое/повтор своего источника.
+
+    Семантика (B-04):
+    - существует src-ключ своего источника → `True` (повторный фетч того же
+      лота, состояние Redis не меняется — апдейт дойдёт до upsert);
+    - существует кросс-ключ (у другого источника) → `False` (межисточниковый
+      дубль нового лота, состояние не меняется);
+    - иначе выставляются ВСЕ ключи (src + кросс) с TTL → `True`.
+
+    Если после `claim` вставка в БД упала — вызывающий **обязан** вызвать
+    `release(redis, listing)`, иначе объявление потеряется до истечения TTL.
 
     Args:
         redis: Клиент Redis.
         listing: Унифицированное объявление.
 
     Returns:
-        `True`, если объявление новое (ключи выставлены); `False`, если
-        хотя бы один ключ уже существовал (состояние не изменено).
+        `True` — лот новый или повторно фетчится своим источником;
+        `False` — новый лот, дублирующий другой источник.
     """
-    keys = _dedup_keys(listing)
-    if not keys:
+    cross_keys = _dedup_keys(listing)
+    if not cross_keys:
         return True  # нечего дедуплицировать — считаем новым
-    result = await redis.eval(_CLAIM_SCRIPT, len(keys), *keys, DEDUP_TTL_SEC)
+    src_keys = _source_keys(listing, cross_keys)
+    keys = [*src_keys, *cross_keys]
+    result = await redis.eval(
+        _CLAIM_SCRIPT, len(keys), *keys, len(src_keys), DEDUP_TTL_SEC
+    )
     claimed = bool(result)
     if not claimed:
-        logger.debug("dedup rejected listing source=%s id=%s", listing.source, listing.source_id)
+        logger.debug(
+            "dedup rejected listing source=%s id=%s", listing.source, listing.source_id
+        )
     return claimed
 
 
@@ -234,9 +283,10 @@ async def release(redis: Redis, listing: UnifiedListing) -> None:
         redis: Клиент Redis.
         listing: Унифицированное объявление.
     """
-    keys = _dedup_keys(listing)
-    if not keys:
+    cross_keys = _dedup_keys(listing)
+    if not cross_keys:
         return
+    keys = [*(_source_keys(listing, cross_keys)), *cross_keys]
     try:
         await redis.eval(_RELEASE_SCRIPT, len(keys), *keys)
     except Exception:  # noqa: BLE001 — release не должен маскировать исходную ошибку
@@ -246,8 +296,9 @@ async def release(redis: Redis, listing: UnifiedListing) -> None:
 
 
 async def is_duplicate(redis: Redis, listing: UnifiedListing) -> bool:
-    """True, если объявление уже встречалось за TTL.
+    """True, если НОВЫЙ лот дублирует другой источник за TTL.
 
+    Повторный фетч лота своим источником (src-ключ существует) — не дубль.
     Обёртка над `claim` для обратной совместимости. **Побочный эффект
     сохранён**: при `False` ключи выставлены. Вызывающий код должен
     обрабатывать откат через `release` при ошибке вставки в БД.
@@ -257,7 +308,7 @@ async def is_duplicate(redis: Redis, listing: UnifiedListing) -> bool:
         listing: Унифицированное объявление.
 
     Returns:
-        `True` — дубль, `False` — новое (ключи выставлены).
+        `True` — межисточниковый дубль, `False` — новое/повтор своего источника.
     """
     return not await claim(redis, listing)
 

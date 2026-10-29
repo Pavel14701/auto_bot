@@ -859,13 +859,15 @@ export function ListingScreen() {
               {agentBusy ? "Отправляем…" : "Агент на сделку"}
             </button>
           )}
-          {/* Калькулятор доставки — обычная ссылка-строка, не кнопка (P1) */}
+          {/* Калькулятор доставки — обычная ссылка-строка, не кнопка (P1);
+              прокидываем страну лота (UX-003, UIUX-GEO §4/§7): калькулятор
+              подставит её в сегмент и посчитает доставку именно от неё */}
           <button
             className="pdp-cta__link"
             onClick={() => {
               haptic();
               navigate(
-                `/calc?${usd != null ? `price=${usd}&` : ""}year=${listing.year ?? ""}&cur=${encodeURIComponent(listing.currency ?? "")}`,
+                `/calc?${usd != null ? `price=${usd}&` : ""}year=${listing.year ?? ""}&cur=${encodeURIComponent(listing.currency ?? "")}&country=${encodeURIComponent(listing.country ?? "")}`,
               );
             }}
           >
@@ -1202,9 +1204,11 @@ export function ListingScreen() {
         </section>
       </div>
 
-      {/* Sticky-CTA на мобиле: цена + избранное + главное действие под пальцем.
-          Консистентен с CTA-блоком: то же избранное; главный источник —
-          «Открыть у источника» (контактом управляет карточка выше). */}
+      {/* Sticky-CTA на мобиле (UX-004): primary — то же действие экрана,
+          что в CTA-карточке («Связаться» / статус «Отправлено ✓» после
+          заявки); «Открыть у источника» — secondary-текстовая ссылка второй
+          строкой (один primary на экране). Избранное/«Поделиться» — под
+          пальцем, как раньше. */}
       <div className="listing-cta-bar">
         <button
           className="listing-cta-bar__fav"
@@ -1223,8 +1227,16 @@ export function ListingScreen() {
           <Share2 size={22} aria-hidden="true" />
         </button>
         <div className="listing-cta-bar__price">{chain.usd ?? chain.original ?? "—"}</div>
-        <button className="listing-cta-bar__btn" onClick={openSource}>
-          Открыть у источника
+        <button
+          type="button"
+          className="listing-cta-bar__btn"
+          disabled={contactSent}
+          onClick={toggleContactForm}
+        >
+          {contactSent ? "Отправлено ✓" : "Связаться"}
+        </button>
+        <button type="button" className="listing-cta-bar__src" onClick={openSource}>
+          Открыть у источника ↗
         </button>
       </div>
     </div>

@@ -163,7 +163,9 @@ async def list_listings(
 async def listing_facets(
     redis: RedisDep,
     use_case: ListListingFacetsDep,
-    make: str | None = None,
+    make: str | None = Query(
+        default=None, max_length=64, pattern=r"^[^\n\r]*$"
+    ),
     country: str | None = Query(
         default=None, pattern="^[A-Za-z]{2}$", description="ISO-3166 alpha-2"
     ),

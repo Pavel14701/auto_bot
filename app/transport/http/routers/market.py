@@ -223,7 +223,7 @@ class MarketLotIn(BaseModel):
     def _photos_https(cls, value: list[str]) -> list[str]:
         """Только http/https-ссылки (фронт грузит их в <img>)."""
         for url in value:
-            if not url.startswith(("http://", "https://")):
+            if not url.startswith("https://"):
                 raise ValueError("photo_url_invalid: только http/https-ссылки")
         return value
 
@@ -233,7 +233,7 @@ def _validate_patch_photos(value: list[str] | None) -> list[str] | None:
     if value is None:
         return None
     for url in value:
-        if not url.startswith(("http://", "https://")):
+        if not url.startswith("https://"):
             raise ValueError("photo_url_invalid: только http/https-ссылки")
     return value
 

@@ -81,7 +81,20 @@ upserted AS (
         currency = EXCLUDED.currency,
         mileage_km = EXCLUDED.mileage_km,
         vin = COALESCE(EXCLUDED.vin, listings.vin),
-        images = EXCLUDED.images,
+        -- B-06: «unchanged»-лот (хэш совпал, лот активен) не откатываем на
+        -- исходные URL, пока в БД стоят S3-зеркала (`/mirror/…`) — иначе
+        -- следующий фетч молча отвязывал карточку от зеркал, а
+        -- mirror_photos_task её больше не возвращал (has_mirror → skip).
+        -- При смене content_hash или после purge исчезавшего лота
+        -- (реактивация: is_active было false, зеркала удалены из S3) —
+        -- пишем исходные URL, зеркало перезальётся.
+        images = CASE
+            WHEN listings.is_active
+                 AND listings.content_hash = EXCLUDED.content_hash
+                 AND listings.images ->> 0 LIKE '%/mirror/%'
+            THEN listings.images
+            ELSE EXCLUDED.images
+        END,
         options = EXCLUDED.options,
         schema_version = EXCLUDED.schema_version,
         parsed_at = EXCLUDED.parsed_at,
@@ -275,6 +288,12 @@ class SqlAlchemyListingsWriter:
         в circuit breaker (error_streak >= SOURCE_CB_ERROR_STREAK)
         пропускаются: источник лежит, его объявления не могли видеться.
 
+        Owner-лоты рынка (owner_type IS NOT NULL: user/partner) никогда не
+        сталеют: их last_seen_at — время создания (пере-фетча нет), а жизнь
+        управляется placement/lifecycle (`market_placement_expiry`,
+        `deactivate_lot`), а не источником. Без фильтра ночной stale-check
+        через 3 дня убивал оплаченные размещения и слоты (B-01).
+
         Args:
             max_age_days: Порог в днях; `None` — из настроек.
 
@@ -298,6 +317,9 @@ class SqlAlchemyListingsWriter:
         stmt = update(Listing).where(
             Listing.is_active.is_(True),
             Listing.last_seen_at < threshold,
+            # B-01: owner-лоты рынка не сталеют — только внешние (encar/kcar/…)
+            # имеют осмысленный last_seen_at; owner-жизнь — placement/lifecycle.
+            Listing.owner_type.is_(None),
         )
         if cb_sources:
             stmt = stmt.where(Listing.source.not_in(list(cb_sources)))

@@ -35,6 +35,15 @@ export function HomeScreen() {
     setVisited((prev) => (prev.has(segment) ? prev : new Set(prev).add(segment)));
   }, [segment]);
 
+  // BF-05: «Показать в ленте» (AI-поиск) меняет только query — сегмент
+  // оставался на AI, критерии применялись в скрытую ленту. Навигация
+  // диспатчит событие — Главная переключается на ленту.
+  useEffect(() => {
+    const onOpenFeed = () => setSegment("feed");
+    window.addEventListener("autobot:open-feed", onOpenFeed);
+    return () => window.removeEventListener("autobot:open-feed", onOpenFeed);
+  }, []);
+
   return (
     <div className="home-screen" data-testid="home-screen">
       <div className="hist-seg home-screen__seg" role="tablist" aria-label="Разделы главной">

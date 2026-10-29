@@ -17,6 +17,7 @@ from redis.asyncio import Redis
 from sqlalchemy import bindparam, func, select, text, update
 
 from app.infrastructure.sources.registry import AdapterRegistry
+from app.infrastructure.sources.common.dedup import release as release_duplicate
 from app.infrastructure.sources.common.proxy import build_proxy_pool
 from app.config import get_settings
 from app.infrastructure.db.models import Listing, Source
@@ -78,9 +79,20 @@ async def fetch_source_task(
                 result = await adapter.fetch(criteria_obj, cursor)
                 latency_ms = int((time.perf_counter() - started) * 1000)
 
-                stats = await save_listings(
-                    session, redis, result.items, storage=ctx.get("storage")
-                )
+                try:
+                    stats = await save_listings(
+                        session, redis, result.items, storage=ctx.get("storage")
+                    )
+                except BaseException:
+                    # B-10: контракт claim→release (dedup.py) — save упал после
+                    # claim ключей дедупа. Не отпустить = ретрай задачи увидит
+                    # пачку «дублями» и потеряет новые лоты до конца TTL (48 ч).
+                    # Отпускаем и ключи cross_dup-предметов: уникальный индекс
+                    # (source, source_id) в БД всё равно защищает от дублей.
+                    if redis is not None:
+                        for item in result.items:
+                            await release_duplicate(redis, item)
+                    raise
                 # Зеркалирование — фоновой задачей: не удлиняет fetch
                 # (encar с чеками уже упирается в job-timeout очереди).
                 pub = ctx.get("publisher")
@@ -109,7 +121,7 @@ async def fetch_source_task(
                 cursor = result.next_cursor
         except Exception as exc:
             logger.exception("fetch_failed: %s", source_name)
-            await record_error(session, source_name, str(exc))
+            await _record_ingest_error(session, source_name, exc)
             return {
                 "source": source_name,
                 "error": str(exc),
@@ -133,6 +145,27 @@ async def fetch_source_task(
             _fire_doctor(ctx, source_name, adapter)
 
         return {"source": source_name, "pages": pages, **totals}
+
+
+async def _record_ingest_error(
+    session: Any, source_name: str, exc: Exception
+) -> None:
+    """Записать ошибку источника, пережив абортнутую транзакцию ингеста (B-05).
+
+    `save_listings` мог уронить транзакцию (IntegrityError/обрыв коннекта):
+    сессия остаётся в aborted state, и `record_error` падал на первом же
+    запросе `PendingRollbackError`'ом — `error_streak` не рос и circuit
+    breaker не открывался никогда. Сначала rollback, а неудача самой
+    записи здоровья не должна маскировать исходную ошибку фетча.
+    """
+    try:
+        await session.rollback()
+    except Exception:  # noqa: BLE001 — воркер должен дожить до record_error
+        logger.warning("fetch_rollback_failed: %s", source_name, exc_info=True)
+    try:
+        await record_error(session, source_name, str(exc))
+    except Exception:  # noqa: BLE001
+        logger.warning("record_error_failed: %s", source_name, exc_info=True)
 
 
 def _fire_doctor(ctx: dict[str, Any], source_name: str, adapter: Any) -> None:
@@ -336,10 +369,12 @@ async def raw_retention_job(ctx: dict[str, Any]) -> dict[str, Any]:
 async def stale_check_job(ctx: dict[str, Any]) -> dict[str, Any]:
     """Cron 04:00 UTC (PLAN.md, фаза 3): устаревшие объявления → is_active=false.
 
-    Источники в circuit breaker пропускаются внутри mark_stale; для
-    деактивированных ставится скан «gone»-уведомлений (аудитория sent_log).
+    Источники в circuit breaker пропускаются внутри mark_stale; owner-лоты
+    рынка (user/partner) не сталеют вообще — их жизнь управляется
+    placement/lifecycle, а не фетчем источника (B-01). Для деактивированных
+    внешних лотов ставится скан «gone»-уведомлений (аудитория sent_log).
     Исчезнувшие ВНЕШНИЕ лоты чистятся из S3 (docs/REDESIGN/11 §4):
-    зеркало фото и raw-объект; owner-лоты рынка не трогаем.
+    зеркало фото и raw-объект.
     """
     async with session_factory() as session:
         gone_ids = await mark_stale(session)
@@ -434,11 +469,27 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     logger.info("fetch_worker_stopped")
 
 
+_MIRROR_URL_MARK = "/mirror/"
+
+
+def _is_mirrored(urls: list[str]) -> bool:
+    """Фото лота в БД — уже S3-зеркала (`…/mirror/{source}/{id}/…`, B-06)?
+
+    Признак — префикс зеркала в первом фото: `mirror_photo` собирает
+    публичный URL `{public_url}/{bucket}/mirror/…`.
+    """
+    return bool(urls) and _MIRROR_URL_MARK in urls[0]
+
+
 async def mirror_photos_task(ctx: dict[str, Any], source: str) -> dict[str, Any]:
     """Фоновое зеркалирование фото внешних лотов (docs/REDESIGN/11 §3).
 
     Берёт свежие активные лоты источника (parsed_at DESC, лимит на прогон
-    mirror_batch) и зеркалит первые N фото; уже зеркаленные skip.
+    mirror_batch) и зеркалит первые N фото. Скип — по зеркальным URL в БД,
+    а не по факту объектов в S3 (B-06): после смены content_hash upsert
+    возвращает исходные URL — зеркало должно перезалиться, даже если
+    старые объекты в S3 ещё живы (ключи `mirror/{source}/{id}/{idx}`
+    перезаписываются).
     """
     from sqlalchemy import select as _select
 
@@ -449,7 +500,6 @@ async def mirror_photos_task(ctx: dict[str, Any], source: str) -> dict[str, Any]
     photos = ctx.get("photos_storage")
     if limit <= 0 or photos is None or not photos.enabled:
         return {"mirrored": 0, "skipped": "disabled"}
-    import httpx
 
     from app.infrastructure.db.models import Listing
 
@@ -474,32 +524,35 @@ async def mirror_photos_task(ctx: dict[str, Any], source: str) -> dict[str, Any]
                     )
                 ).all()
             )
+        # SEC-01: загрузка только через SSRF-гвард (скачивать напрямую
+        # нельзя — тело ответа уходит в публичный бакет). Импорт внутри
+        # функции: тесты подменяют download_photo в модуле photos.
+        from app.infrastructure.storage.photos import download_photo
+
         replaced: list[tuple[int, list[str]]] = []
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            for _id, src, sid, images in rows:
-                urls = [u for u in (images or []) if isinstance(u, str) and u]
-                if not urls:
-                    continue
-                if await photos.has_mirror(src, sid):
-                    skipped += 1
-                    continue
-                out: list[str] = []
-                ok = True
-                for idx, url in enumerate(urls[:limit]):
-                    try:
-                        resp = await client.get(url)
-                        resp.raise_for_status()
-                        ctype = resp.headers.get("content-type", "")
-                        ext = "png" if "png" in ctype else "webp" if "webp" in ctype else "jpg"
-                        out.append(await photos.mirror_photo(src, sid, idx, resp.content, ext))
-                    except Exception:  # noqa: BLE001 — фото опционально
-                        ok = False
-                        break
-                if ok and len(out) == min(len(urls), limit):
-                    mirrored += len(out)
-                    replaced.append((_id, out))
-                elif out:  # частичное — убрать, не ломать порядок
-                    await photos.delete_lot_mirror(src, sid)
+        for _id, src, sid, images in rows:
+            urls = [u for u in (images or []) if isinstance(u, str) and u]
+            if not urls:
+                continue
+            if _is_mirrored(urls):
+                skipped += 1
+                continue
+            out: list[str] = []
+            ok = True
+            for idx, url in enumerate(urls[:limit]):
+                try:
+                    # SEC-01: приватные/loopback/link-local хосты и хопы
+                    # редиректов запрещены, размер и формат — с проверкой.
+                    content, ext = await download_photo(url)
+                    out.append(await photos.mirror_photo(src, sid, idx, content, ext))
+                except Exception:  # noqa: BLE001 — фото опционально
+                    ok = False
+                    break
+            if ok and len(out) == min(len(urls), limit):
+                mirrored += len(out)
+                replaced.append((_id, out))
+            elif out:  # частичное — убрать, не ломать порядок
+                await photos.delete_lot_mirror(src, sid)
         if replaced:
             async with session_factory() as session:
                 for lid, new_urls in replaced:

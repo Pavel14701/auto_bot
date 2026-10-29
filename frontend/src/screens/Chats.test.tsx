@@ -233,10 +233,11 @@ describe("Chats: список и overlay-роут", () => {
     expect(screen.getAllByText("💬 Написать в поддержку").length).toBe(2);
   });
 
-  it("ошибка загрузки — ретрай повторяет GET /chats", async () => {
+  it("ошибка загрузки — человекочитаемый текст (маппинг) + ретрай повторяет GET /chats", async () => {
     mocks.api.mockRejectedValueOnce(new Error("503")).mockResolvedValue([]);
     renderAt("/chats");
-    await waitFor(() => expect(screen.getByText(/503/)).toBeTruthy());
+    // сырой текст ошибки наружу не показываем (UX-005) — маппинг 03 §3.2
+    await waitFor(() => expect(screen.getByText(/Что-то пошло не так/)).toBeTruthy());
     fireEvent.click(screen.getByText("Повторить"));
     await waitFor(() => expect(screen.getByText("Диалогов пока нет")).toBeTruthy());
   });
@@ -447,6 +448,34 @@ describe("Chats v2: присоединение по коду (07 §2)", () => {
       }),
     );
     expect(document.querySelector('[data-testid="chat-room"]')).toBeNull();
+  });
+
+  it("ошибка join 404 invite_not_found — текст маппинга, без сырого detail (UX-005)", async () => {
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path === "/chats/join")
+        throw Object.assign(new Error("invite_not_found: код истёк или не существует"), {
+          status: 404,
+        });
+      if (path === "/chats") return THREADS;
+      if (path === "/chats/ws-token") throw new Error("401");
+      return undefined;
+    });
+    renderAt("/chats");
+    await waitFor(() => expect(screen.getByText("Kia K5")).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "👥 Переговорные" }));
+    fireEvent.change(screen.getByLabelText("Код переговорной"), { target: { value: "ZZ9Q1X" } });
+    fireEvent.click(screen.getByRole("button", { name: "Присоединиться" }));
+    await waitFor(() =>
+      expect(mocks.toastShow).toHaveBeenCalledWith(
+        "Код приглашения истёк или не существует — попросите новый.",
+        { error: true },
+      ),
+    );
+    // сырой detail не показан
+    expect(mocks.toastShow).not.toHaveBeenCalledWith(
+      expect.stringContaining("invite_not_found"),
+      expect.anything(),
+    );
   });
 });
 

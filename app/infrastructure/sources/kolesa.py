@@ -30,6 +30,7 @@ pydantic с ``extra="ignore"`` молча отбрасывает kwarg, поэт
 начнёт работать без правки адаптера.
 """
 
+import asyncio
 import logging
 import re
 from decimal import Decimal
@@ -56,6 +57,19 @@ DEFAULT_BASE_URL = "https://kolesa.kz"
 # Секция легковых автомобилей (легковые с пробегом).
 DEFAULT_LIST_PATH = "/cars/"
 DEFAULT_MAX_PAGES = 5
+
+# Детальные страницы (v2, 2026-10-29): галерея -full.webp, словарные
+# характеристики (кузов/привод/руль/цвет/коробка), опции-чипы. Ошибка
+# отдельной карточки не роняет страницу — остаются данные списка.
+DEFAULT_DETAIL_LIMIT = 8
+DEFAULT_DETAIL_CONCURRENCY = 3
+MAX_DETAIL_IMAGES = 10
+_KZ_IMG_RE = re.compile(
+    r"(https://kolesa-photos\.kcdn\.online/\w+/[0-9a-f]{2}/[0-9a-f-]{36})/(\d+)-"
+)
+_DRIVE_MAP = (
+    ("передн", "front"), ("задн", "rear"), ("полн", "awd"),
+)
 
 # --- Селекторы (сверены с живым HTML kolesa.kz/cars/ 2026-10-28) -----------
 # Стандартная карточка: <div class="a-card  js__a-card" data-id="232057208">.
@@ -273,6 +287,12 @@ class KolesaHtmlAdapter(BaseApiAdapter):
         self._region_selector = self.config.get("region_selector", DEFAULT_REGION_SELECTOR)
         self._img_scope = self.config.get("img_scope_selector", DEFAULT_IMG_SCOPE_SELECTOR)
         self._img_selector = self.config.get("img_selector", DEFAULT_IMG_SELECTOR)
+        self._enrich_details = bool(self.config.get("enrich_details", True))
+        try:
+            self._detail_limit = max(0, int(self.config.get("detail_limit", DEFAULT_DETAIL_LIMIT)))
+            self._detail_conc = max(1, int(self.config.get("detail_concurrency", DEFAULT_DETAIL_CONCURRENCY)))
+        except (TypeError, ValueError):
+            self._detail_limit, self._detail_conc = DEFAULT_DETAIL_LIMIT, DEFAULT_DETAIL_CONCURRENCY
         try:
             self._max_pages = max(1, int(self.config.get("max_pages", DEFAULT_MAX_PAGES)))
         except (TypeError, ValueError) as exc:
@@ -306,6 +326,10 @@ class KolesaHtmlAdapter(BaseApiAdapter):
             self._base_url + self._list_path, params=params, headers=dict(HEADERS)
         )
         items = self._parse(resp.text)
+        # v2: детальные карточки — галерея/характеристики/опции (лучшие N
+        # страницы; ошибка карточки не роняет страницу).
+        if items and self._enrich_details and self._detail_limit:
+            await self._enrich_from_details(items)
 
         if page > 1 and not items:
             # Либо конец пагинации, либо страница за пределами выдачи.
@@ -466,6 +490,109 @@ class KolesaHtmlAdapter(BaseApiAdapter):
                 "html_truncated": len(card.html) > 2000,
             },
         )
+
+    # --- детальные страницы (v2) ---------------------------------------
+
+    async def _enrich_from_details(self, items: list[UnifiedListing]) -> None:
+        """Догружает топ-N карточек страницы: галерея, словарные поля, опции.
+
+        Referer обязателен (без него детальная страница отдаёт 418);
+        concurrency ограничен семафором — вежливость к источнику.
+        """
+        headers = dict(HEADERS)
+        headers["Referer"] = self._base_url + self._list_path
+        sem = asyncio.Semaphore(self._detail_conc)
+
+        async def _one(item: UnifiedListing) -> None:
+            async with sem:
+                try:
+                    resp = await self.http.get(str(item.url), headers=headers)
+                except Exception:  # noqa: BLE001 — карточка не роняет страницу
+                    logger.warning(
+                        "kolesa_detail_failed source_id=%s", item.source_id, exc_info=True
+                    )
+                    return
+                try:
+                    self._apply_detail(item, resp.text)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "kolesa_detail_parse_error source_id=%s",
+                        item.source_id,
+                        exc_info=True,
+                    )
+
+        await asyncio.gather(*(_one(x) for x in items[: self._detail_limit]))
+
+    def _apply_detail(self, item: UnifiedListing, html: str) -> None:
+        """Накладывает данные детальной страницы на объявление (in-place).
+
+        Галерея: все фото CDN приводятся к полноразмеру ``{N}-full.webp``,
+        дедуп по (bucket, номер), сортировка по номеру. Характеристики —
+        ``dt.value-title[title]`` + ``dd.value``. Опции — чипы
+        ``.offer__option-label``.
+        """
+        # Галерея: regex над html — srcset-варианты схлопываются в -full
+        seen: dict[tuple[str, int], str] = {}
+        for base, num in _KZ_IMG_RE.findall(html):
+            key = (base, int(num))
+            if key not in seen:
+                seen[key] = f"{base}/{num}-full.webp"
+        if seen:
+            gallery = [
+                seen[k] for k in sorted(seen, key=lambda x: x[1])
+            ][:MAX_DETAIL_IMAGES]
+            # Списочное фото первым: сохраняем порядок галереи источника
+            item.images = gallery  # type: ignore[assignment]
+
+        # Словарные характеристики dt/dd
+        params: dict[str, str] = {}
+        tree = HTMLParser(html)
+        for dl in tree.css("div.offer__parameters dl"):
+            dt = dl.css_first("dt.value-title")
+            dd = dl.css_first("dd.value")
+            if dt is None or dd is None:
+                continue
+            name = (dt.attributes.get("title") or dt.text(strip=True)).strip()
+            value = dd.text(strip=True)
+            if name and value:
+                params[name] = value
+        if params:
+            item.body_type = (
+                normalize_body(params.get("Кузов")) or item.body_type
+            )
+            # «Объем двигателя, л»: «2.5 (гибрид)» → объём + топливо
+            eng = params.get("Объем двигателя, л", "")
+            # «2.5 (гибрид)» — литры без суффикса «л» (в отличие от списка)
+            vol = re.search(r"(\d+(?:[.,]\d+)?)", eng)
+            if vol:
+                item.engine_volume = normalize_engine_volume(vol.group(1)) or item.engine_volume
+                item.fuel = detect_fuel(eng) or item.fuel
+            # «Пробег»: «201 000 км» — точнее списка
+            km = _digits_to_int(params.get("Пробег", ""))
+            if km and km < 5_000_000:
+                item.mileage_km = km
+            item.generation = params.get("Поколение") or item.generation
+            item.transmission = (
+                detect_transmission(params.get("Коробка передач"))
+                or item.transmission
+            )
+            drive = params.get("Привод", "").lower()
+            item.drive = next(
+                (code for token, code in _DRIVE_MAP if token in drive),
+                item.drive,
+            )
+            item.color = params.get("Цвет") or item.color
+            item.location = params.get("Город") or item.location
+            item.raw = {**item.raw, "detail_params": params}
+
+        # Опции-чипы (русскоязычные — как у encar options)
+        options = [
+            chip.text(strip=True)
+            for chip in tree.css("span.offer__option-label")
+        ]
+        options = [o for o in options if o][:40]
+        if options:
+            item.options = options
 
     @staticmethod
     def _extract_mileage(text: str) -> int | None:

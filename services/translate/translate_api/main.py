@@ -1,9 +1,11 @@
 """Translate API — лёгкий HTTP-сервис перевода тайтлов (PLAN.md, фаза 5).
 
 Optional-сервис: бэкенд включен флагом TRANSLATE_ENABLED + TRANSLATE_SERVICE_URL;
-аутентификация — Bearer API_TOKEN (если задан; иначе эндпоинт открыт в
-доверенной сети). Модель грузится и прогревается на старте (иначе первый
-батч после рестарта бэкенд перевёл бы с fallback на оригинал); инференс —
+аутентификация — Bearer API_TOKEN, токен ОБЯЗАТЕЛЕН: пустой/отсутствующий
+API_TOKEN = отказ всем (fail-closed, INFRA-02 аудит 2026-10-29 — раньше
+пустой токен открывал NLLB-инференс анонимно). Сравнение timing-safe.
+Модель грузится и прогревается на старте (иначе первый батч после
+рестарта бэкенд перевёл бы с fallback на оригинал); инференс —
 в threadpool, т.к. transformers синхронный.
 
     POST /translate {"texts": [...], "source_lang": "auto", "target_lang": "rus_Cyrl"}
@@ -11,6 +13,7 @@ Optional-сервис: бэкенд включен флагом TRANSLATE_ENABLE
     GET  /health → {"status": "ok", "model": "...", "loaded": true}
 """
 
+import hmac
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -93,7 +96,21 @@ class TranslateResponse(BaseModel):
 
 
 def _check_token(authorization: str | None) -> None:
-    if API_TOKEN and authorization != f"Bearer {API_TOKEN}":
+    """Аутентификация Bearer — fail-closed (INFRA-02, аудит 2026-10-29).
+
+    Пустой API_TOKEN = токен не настроен → ОТКАЗ (раньше пустой токен
+    означал «эндпоинт открыт», и NLLB-инференс гонял кто угодно).
+    Сравнение timing-safe через hmac.compare_digest по байтам —
+    str-вариант падает TypeError на non-ASCII заголовке.
+    """
+    if not API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API token not configured",
+        )
+    expected = f"Bearer {API_TOKEN}".encode()
+    provided = (authorization or "").encode()
+    if not hmac.compare_digest(provided, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token"
         )

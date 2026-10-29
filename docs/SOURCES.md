@@ -339,6 +339,36 @@ endpoints анонимны. Устойчивость обеспечивают: �
 
 ---
 
+## 4a. Kolesa v2: детальные страницы (2026-10-29)
+
+Списочный парсинг давал 1 фото и 5 полей; v2 добавила обогащение деталями
+(`_enrich_from_details`, топ-8 карточек страницы, семафор 3):
+
+- **Галерея**: все фото CDN нормализуются к полноразмеру `{N}-full.webp`
+  (srcset-варианты схлопываются), дедуп по (bucket, номер), сортировка по
+  номеру, лимит 10. Referer обязателен — без него деталь отдаёт 418.
+- **Характеристики** `dt.value-title[title]`+`dd.value`: кузов, коробка,
+  привод (передний/задний/полный → front/rear/awd), цвет, город, поколение,
+  «Объем двигателя, л» («2.5 (гибрид)» → объём + fuel), «Пробег» (точнее
+  списка). Всё — в `raw.detail_params` для перепарсинга.
+- **Опции**: чипы `offer__option-label` → `options` (до 40, русские).
+- Ошибка/418/500 карточки не роняет страницу — остаются данные списка.
+  Конфиг: `enrich_details` (default true), `detail_limit`, `detail_concurrency`.
+
+## 4b. Антибот-источники (dubizzle / cars_com / che168): включение
+
+Imperva (dubizzle), Akamai (cars.com) и JS-челлендж EO_Bot_Ssid (che168)
+закрывают и HTML, и публичные API с датацентровых IP (проверено 2026-10-29;
+альтернативы yallamotor/ksl/guazi — тоже за стеной). Код готов к включению:
+
+- `capabilities.use_proxy: true` (в сидах) → registry подставляет
+  `ProxyPool` (Redis, ротация на запрос) в HttpClient;
+- шлюз резидентных прокси: `PROXY_DATAIMPULSE_USER/PASS/HOST/PORT`
+  (`app/config.py`; gw.dataimpulse.com:823 HTTPS) — fetch-воркер строит пул
+  (`build_proxy_pool`); подойдёт любой резидентный провайдер;
+- порядок включения: креды в .env → рестарт worker_fetch → PUT
+  `/api/admin/sources/{name}` `enabled=true` → наблюдение healthcheck.
+
 ## 5. Fetch-воркер — `app/infrastructure/workers/fetch.py`
 
 Запуск: `uv run python -m app.infrastructure.workers.fetch`. Очередь

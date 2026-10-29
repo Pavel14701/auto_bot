@@ -2296,3 +2296,13 @@
     justify-content: flex-end;
   }
 }
+
+/* UX-016 (аудит 2026-10-29): тач-цели чипов/крестиков/компактных кнопок
+   на мобиле — не меньше --touch-min (Фиттс). */
+@media (max-width: 767px) {
+  .pa-chip,
+  .pa-chip__x,
+  .pa-btn-sm {
+    min-height: var(--touch-min, 44px);
+  }
+}

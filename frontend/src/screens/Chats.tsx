@@ -38,6 +38,7 @@ import { getViews, type ViewedListing } from "../lib/viewHistory";
 import { ChatList } from "../components/chat/ChatList";
 import { ChatRoom } from "../components/chat/ChatRoom";
 import { useToast } from "../ui/Toast";
+import { apiErrorText } from "./apiErrorText";
 import "./chats.css";
 
 /** Сегмент списка: 1:1-диалоги (support/seller/deal) | переговорные (group). */
@@ -186,14 +187,15 @@ export function ChatsScreen() {
       navigate(`/chats/${threadId}`);
       refresh(); // список пополнятся новой переговорной в фоне
     } catch (e) {
-      // 409-контракты 08 §1: без листинга / лот снят — человеческим текстом
+      // 409-контракты 08 §1: без листинга / лот снят — человеческим текстом;
+      // остальное — маппинг 03 §3.2 (сырой detail наружу не показываем)
       const msg = (e as Error).message;
       if (/group_needs_listing/i.test(msg)) {
         setGroupError("Переговорная создаётся только по автомобилю — выберите лот");
       } else if (/listing_not_active/i.test(msg)) {
         setGroupError("Этот лот уже неактивен — выберите другой");
       } else {
-        setGroupError(`Не удалось создать переговорную: ${msg}`);
+        setGroupError(apiErrorText(e));
       }
     } finally {
       setCreateBusy(false);
@@ -214,7 +216,8 @@ export function ChatsScreen() {
       if (isGroupFullError(e)) {
         toast.show("Переговорная заполнена (макс. 5)", { error: true });
       } else {
-        toast.show(`Не удалось присоединиться: ${(e as Error).message}`, { error: true });
+        // 404 invite_not_found и прочее — по маппингу, без сырого detail
+        toast.show(apiErrorText(e), { error: true });
       }
     } finally {
       setJoinBusy(false);
@@ -436,7 +439,7 @@ export function ChatsScreen() {
         )}
         {!loading && error && (
           <div className="chats-error">
-            {error}
+            {apiErrorText(error)}
             <button type="button" className="chats-error__retry" onClick={reload}>
               Повторить
             </button>

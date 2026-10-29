@@ -25,6 +25,9 @@ from app.application.dialog.ports import QuotaStore
 from app.application.dialog.use_cases import SendDialogMessage
 from app.application.errors import AppError
 from app.application.quota.use_cases import quota_used
+from app.application.catalog.dto import GUEST_FORBIDDEN_MESSAGE
+from app.application.catalog.ports import UserLookupPort
+from app.application.errors import Forbidden, NotFound
 from app.application.shared.ports import CachePort
 
 logger = logging.getLogger(__name__)
@@ -87,10 +90,12 @@ class SendAiMessage:
         limiter: MessageRateLimiter,
         send_message: SendDialogMessage,
         quota: AiDailyQuota,
+        users: UserLookupPort,
     ) -> None:
         self._limiter = limiter
         self._send_message = send_message
         self._quota = quota
+        self._users = users
 
     async def execute(self, command: AiMessageCommand) -> DialogReply:
         """Ответить на сообщение.
@@ -101,6 +106,16 @@ class SendAiMessage:
             NotFound: Пользователя нет.
             Forbidden: Пользователь деактивирован.
         """
+        # Гость → 403 (AI-01 аудита 2026-10-29): мультигостевые аккаунты не
+        # должны получать свежие суточные LLM-квоты; поиск — после входа.
+        profile = await self._users.get(command.user_id)
+        if profile is None:
+            raise NotFound("User not found")
+        if not profile.is_active:
+            raise Forbidden("User is deactivated")
+        if profile.is_guest:
+            logger.info("ai_guest_forbidden user_id=%s", command.user_id)
+            raise Forbidden(GUEST_FORBIDDEN_MESSAGE)
         await self._limiter.check(command.user_id)
         try:
             quota_used_today = await self._quota.used(command.user_id)
